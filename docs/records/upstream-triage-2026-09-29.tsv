@@ -657,3 +657,36 @@ issue	2438	windows	跟：Windows（本 fork 主要環境）		False	bug,windows	2
 issue	2435	neutral	觀察：平台中立，隨上游		False	editor/integration	2026-09-29	install: tables Codex Desktop appends above the trailing SessionStart closing marker make the Codex hook preflight refuse (`ambiguous_hook_ownership`)	https://github.com/DeusData/codebase-memory-mcp/issues/2435
 issue	2433	neutral	觀察：平台中立，隨上游		False	ux/behavior	2026-09-29	`server/discover` returns `-32601 Method not found`, so every modern MCP SDK connect logs an error	https://github.com/DeusData/codebase-memory-mcp/issues/2433
 issue	2432	neutral	觀察：平台中立，隨上游		False		2026-09-29	Indexing gap: src/pages/styles	https://github.com/DeusData/codebase-memory-mcp/issues/2432
+pr	2473	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(pkg): apply the Go wrapper's archive size limits to npm and PyPI	https://github.com/DeusData/codebase-memory-mcp/pull/2473
+pr	2472	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(pipeline): never bind an external Python base class to a same-named project class	https://github.com/DeusData/codebase-memory-mcp/pull/2472
+pr	2471	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(routes): mint Laravel routes written without a leading slash	https://github.com/DeusData/codebase-memory-mcp/pull/2471
+pr	2470	neutral	觀察：平台中立，隨上游		False		2026-10-01	build(deps): bump github/codeql-action to 4.38.1 in one step	https://github.com/DeusData/codebase-memory-mcp/pull/2470
+pr	2469	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(store): cut WAL write amplification on 64 KiB-page indexes (#1419)	https://github.com/DeusData/codebase-memory-mcp/pull/2469
+pr	2468	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(cli): client detection for OpenCode, Hermes, Claude (#1167, #1180)	https://github.com/DeusData/codebase-memory-mcp/pull/2468
+pr	2467	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(install): keep foreign tables between the managed TOML markers (#2228)	https://github.com/DeusData/codebase-memory-mcp/pull/2467
+pr	2466	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(cpp): resolve Class::member calls across files (#1153)	https://github.com/DeusData/codebase-memory-mcp/pull/2466
+pr	2465	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(routes): HANDLES for Laravel array and invokable controller actions	https://github.com/DeusData/codebase-memory-mcp/pull/2465
+pr	2464	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(pipeline): route registrations survive the cross-language guard	https://github.com/DeusData/codebase-memory-mcp/pull/2464
+pr	2463	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(pipeline): classify capitalized `Axios` calls as HTTP clients	https://github.com/DeusData/codebase-memory-mcp/pull/2463
+pr	2462	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(pipeline): no method-less arg_url twin for a typed HTTP call	https://github.com/DeusData/codebase-memory-mcp/pull/2462
+pr	2461	windows	跟：Windows（本 fork 主要環境）		False		2026-10-01	fix(artifact): write and detect artifacts through wide paths on Windows (#1171)	https://github.com/DeusData/codebase-memory-mcp/pull/2461
+pr	2459	neutral	觀察：平台中立，隨上游		False		2026-10-01	fix(extract): capture complete doc comments across languages	https://github.com/DeusData/codebase-memory-mcp/pull/2459
+pr	2458	neutral	觀察：平台中立，隨上游		False	enhancement,github_actions,priority/high	2026-10-01	ci: PR lane selection (R1) with strict ci-ok, report-only test-impact shadow, unsharded PR legs	https://github.com/DeusData/codebase-memory-mcp/pull/2458
+pr	2457	neutral	觀察：平台中立，隨上游		False	bug,parsing/quality,priority/high	2026-10-01	fix(haskell): name infix-form definitions after the operator	https://github.com/DeusData/codebase-memory-mcp/pull/2457
+pr	2456	neutral	觀察：平台中立，隨上游		False	bug,parsing/quality,priority/high,ux/behavior	2026-10-01	fix(mcp): blame the label only when it matches nothing	https://github.com/DeusData/codebase-memory-mcp/pull/2456
+pr	2453	neutral	觀察：平台中立，隨上游		True	bug,parsing/quality,priority/high	2026-09-30	fix(go): extract Variables from grouped var ( ... ) declarations	https://github.com/DeusData/codebase-memory-mcp/pull/2453
+pr	2452	neutral	觀察：平台中立，隨上游		True	enhancement,parsing/quality,priority/normal	2026-09-30	feat(go): emit BINDS edges for google/wire wire.Bind	https://github.com/DeusData/codebase-memory-mcp/pull/2452
+pr	2451	neutral	觀察：平台中立，隨上游		False		2026-09-30	build(pypi): bump urllib3 to 2.8.0 in the publish toolchain pins	https://github.com/DeusData/codebase-memory-mcp/pull/2451
+pr	2450	neutral	觀察：平台中立，隨上游		False	bug,parsing/quality,priority/high	2026-09-30	fix(extract): name macro-wrapped C/C++ definitions after the macro argument (#946, #1957)	https://github.com/DeusData/codebase-memory-mcp/pull/2450
+pr	2449	neutral	觀察：平台中立，隨上游		False	bug,priority/high	2026-09-30	fix(build): make prod objects follow TEST_SEAMS; stop cx tmp leak	https://github.com/DeusData/codebase-memory-mcp/pull/2449
+pr	2448	neutral	觀察：平台中立，隨上游		False	bug,editor/integration,priority/high	2026-09-30	fix(hook-augment): log under the cache dir, never at a cut-off path	https://github.com/DeusData/codebase-memory-mcp/pull/2448
+pr	2447	neutral	觀察：平台中立，隨上游		False	bug,parsing/quality,priority/high	2026-09-30	fix(routes): compose the Laravel 11+ withRouting api prefix into Route paths (#1146)	https://github.com/DeusData/codebase-memory-mcp/pull/2447
+pr	2446	neutral	觀察：平台中立，隨上游		False	bug,priority/high,ux/behavior	2026-09-30	fix(mcp): resolve a directory project arg to its owning project (#1690)	https://github.com/DeusData/codebase-memory-mcp/pull/2446
+pr	2445	neutral	觀察：平台中立，隨上游		False	bug,cypher,priority/high,stability/performance	2026-09-30	fix(cypher): grow the OPTIONAL fallback buffer in the rel cross-join	https://github.com/DeusData/codebase-memory-mcp/pull/2445
+pr	2443	neutral	觀察：平台中立，隨上游		False	documentation,priority/normal,ux/behavior	2026-09-30	docs(cli): list daemon <start|stop|status> in --help	https://github.com/DeusData/codebase-memory-mcp/pull/2443
+issue	2460	neutral	觀察：平台中立，隨上游		False	enhancement	2026-10-01	request for VB support	https://github.com/DeusData/codebase-memory-mcp/issues/2460
+issue	2455	neutral	觀察：平台中立，隨上游		False	enhancement,parsing/quality,priority/normal	2026-10-01	Django URLconf routes are not extracted (only DRF @action is)	https://github.com/DeusData/codebase-memory-mcp/issues/2455
+issue	2454	neutral	觀察：平台中立，隨上游		False	bug,parsing/quality,priority/high,ux/behavior	2026-10-01	search_graph: an empty result says the label has no nodes when another filter emptied it	https://github.com/DeusData/codebase-memory-mcp/issues/2454
+issue	2444	neutral	觀察：平台中立，隨上游		False	enhancement,parsing/quality,priority/normal	2026-09-30	go: Wire (google/wire) dependency-injection bindings are not modeled, so interface calls can't be resolved per binary	https://github.com/DeusData/codebase-memory-mcp/issues/2444
+issue	2442	neutral	觀察：平台中立，隨上游		False	bug,github_actions,priority/high	2026-09-30	lint-mem gate can't fail: CI analyses no file, and the gate drops every analyzer finding	https://github.com/DeusData/codebase-memory-mcp/issues/2442
+issue	2441	neutral	觀察：平台中立，隨上游		False	bug,editor/integration,priority/high,stability/performance	2026-09-30	hook-augment 0.11.0: SessionStart/PreToolUse exit 0 with empty stdout on a ready index	https://github.com/DeusData/codebase-memory-mcp/issues/2441
