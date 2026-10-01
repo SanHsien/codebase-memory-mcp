@@ -1463,7 +1463,47 @@ TEST(config_toml_remove_self_heals_orphan_opening_marker_issue1558) {
     PASS();
 }
 
+/* Windows install paths routinely contain spaces (C:\Program Files, C:\Users\John Doe).
+ * The command is already single-quoted for the shell, but the safety check rejected any
+ * space, so the Codex hooks were never installed for those users. */
+TEST(config_toml_codex_hooks_accept_install_path_with_spaces) {
+    const char *command =
+        "'C:\\Program Files\\codebase-memory-mcp\\codebase-memory-mcp.exe' hook-augment";
+    const char *command_windows =
+        "& 'C:\\Program Files\\codebase-memory-mcp\\codebase-memory-mcp.exe' hook-augment";
+    char dir[CTE_PATH_CAP];
+    char path[CTE_PATH_CAP];
+    char actual[CTE_FILE_CAP];
+    ASSERT_EQ(cte_fixture(dir, sizeof(dir), path, sizeof(path)), 0);
+    ASSERT_EQ(th_write_file(path, "[mcp_servers.other]\nkeep = true\n"), 0);
+
+    cbm_toml_codex_hook_failure_t failure = CBM_TOML_CODEX_HOOK_FAILURE_INVALID_ARGUMENT;
+    ASSERT_EQ(cte_codex_edit_commands_detailed(path, command, command_windows,
+                                               CBM_TOML_CODEX_HOOK_UPSERT, 0, &failure),
+              0);
+    ASSERT_EQ(failure, CBM_TOML_CODEX_HOOK_FAILURE_NONE);
+    ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
+    ASSERT_NOT_NULL(strstr(actual, "Program Files"));
+    ASSERT_NOT_NULL(strstr(actual, "keep = true"));
+    ASSERT_EQ(cte_occurrences(actual, "[[hooks.SessionStart]]"), 1);
+
+    /* idempotent, and removable */
+    ASSERT_EQ(cte_codex_edit_commands_detailed(path, command, command_windows,
+                                               CBM_TOML_CODEX_HOOK_UPSERT, 0, &failure),
+              0);
+    ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
+    ASSERT_EQ(cte_occurrences(actual, "[[hooks.SessionStart]]"), 1);
+    ASSERT_EQ(cte_codex_edit_commands_detailed(path, command, command_windows,
+                                               CBM_TOML_CODEX_HOOK_REMOVE, 0, &failure),
+              0);
+    ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
+    ASSERT_NULL(strstr(actual, "hook-augment"));
+    th_cleanup(dir);
+    PASS();
+}
+
 SUITE(config_toml_edit) {
+    RUN_TEST(config_toml_codex_hooks_accept_install_path_with_spaces);
     RUN_TEST(config_toml_remove_self_heals_orphan_closing_marker_issue1558);
     RUN_TEST(config_toml_remove_self_heals_orphan_opening_marker_issue1558);
     RUN_TEST(config_toml_rejects_stale_content_and_identity);

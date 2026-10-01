@@ -6,14 +6,14 @@
 
 [`DeusData/codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp)（MIT）的 fork：把程式碼庫索引成本機知識圖譜，透過 MCP 供 AI 工具查詢（純 C、全本機）。`origin` = `SanHsien/codebase-memory-mcp`，`upstream` = DeusData。fork 內容見 [`FORK.md`](FORK.md)，決策見 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
 
-主要環境是 Windows 11 + PowerShell；本機沒有 C 工具鏈，C 由 CI 驗證。
+主要環境是 Windows 11 + PowerShell。C 程式用 MSYS2 CLANG64 本機建置與測試（步驟見 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)）。
 
 ## 硬性邊界
 
 - 不提交索引資料庫、個資、API key、token、`.env`。
 - 不推送到 `upstream`；PR、push、release 一律指向 `SanHsien/codebase-memory-mcp`。
 - 不移除上游署名、`LICENSE`、`THIRD_PARTY.md` 與 vendored 授權。
-- 不動 `src/`、`internal/`、`vendored/`、`tests/`，除非有明確理由；動上游持有檔案要在 [`docs/DIVERGENCE.md`](docs/DIVERGENCE.md) 登記（`tools/check_divergence.py` 會檢查）。
+- 動 C 程式碼先寫會失敗的測試、確認失敗，再修；動上游持有檔案要在 [`docs/DIVERGENCE.md`](docs/DIVERGENCE.md) 登記（`tools/check_divergence.py` 會檢查）。
 - 不啟用 `core.hooksPath scripts/hooks`。
 
 ## 開發原則

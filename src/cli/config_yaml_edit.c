@@ -860,9 +860,7 @@ static int yaml_replace_file(const char *temp_path, const char *path, bool desti
         free(wide_path);
         return YAML_ERROR;
     }
-    BOOL replaced = destination_exists ? ReplaceFileW(wide_path, wide_temp, NULL,
-                                                      REPLACEFILE_WRITE_THROUGH, NULL, NULL)
-                                       : MoveFileExW(wide_temp, wide_path, MOVEFILE_WRITE_THROUGH);
+    bool replaced = cbm_win_replace_file_retry(wide_path, wide_temp, destination_exists != 0);
     free(wide_temp);
     free(wide_path);
     return replaced ? 0 : YAML_ERROR;
@@ -2141,8 +2139,22 @@ static int yaml_parse_flow_items(const yaml_doc_t *doc, size_t open_pos, size_t 
     return yaml_finish_flow_items(doc, segment, close_pos, line, items, saw_content);
 }
 
+/* Does this line start a block-sequence entry (`- x`) at column 0? */
+static bool yaml_line_is_column_zero_dash(const yaml_doc_t *doc, const yaml_line_t *line) {
+    size_t p = line->start;
+    return p < line->text_end && doc->data[p] == '-' &&
+           (p + YAML_UNIT == line->text_end || doc->data[p + YAML_UNIT] == ' ');
+}
+
 static int yaml_parse_block_list(const yaml_doc_t *doc, yaml_list_target_t *target) {
     size_t end_line = yaml_top_level_section_end(doc, target->key_line);
+    /* `key:` followed by `- item` at column 0 is a valid list that PyYAML writes by
+     * default, but the section scan treats that first dash line as the next top-level
+     * key. Editing would insert our item before the existing ones and detach them
+     * from the key. Refuse rather than corrupt the file. */
+    if (end_line < doc->line_count && yaml_line_is_column_zero_dash(doc, &doc->lines[end_line])) {
+        return YAML_ERROR;
+    }
     target->section_end = end_line < doc->line_count ? doc->lines[end_line].start : doc->len;
     for (size_t i = target->key_line + YAML_UNIT; i < end_line; i++) {
         const yaml_line_t *child = &doc->lines[i];
@@ -2630,11 +2642,20 @@ static size_t yaml_sequence_line_offset(const yaml_doc_t *doc, size_t line_index
     return line_index < doc->line_count ? doc->lines[line_index].start : doc->len;
 }
 
+/* Returns (size_t)-1 when the section starts with an indentless sequence: dash lines at
+ * the same indent as the key. The indent-based scan would end the section at the first
+ * dash and we would insert before the user's own entries. */
 static size_t yaml_sequence_nested_end(const yaml_doc_t *doc, size_t header_line,
                                        size_t parent_end) {
     size_t indent = doc->lines[header_line].indent;
     for (size_t i = header_line + YAML_UNIT; i < parent_end; i++) {
         const yaml_line_t *line = &doc->lines[i];
+        if (!line->blank && !line->comment && !line->dquote_cont && line->indent == indent &&
+            doc->data[line->start + line->indent] == '-' &&
+            (line->start + line->indent + YAML_UNIT == line->text_end ||
+             doc->data[line->start + line->indent + YAML_UNIT] == ' ')) {
+            return (size_t)-1;
+        }
         if (!line->blank && !line->comment && !line->dquote_cont && line->indent <= indent) {
             return i;
         }
@@ -2977,6 +2998,9 @@ static int yaml_sequence_analyze(const yaml_doc_t *doc, const char *const *seque
             return YAML_ERROR;
         }
         size_t child_end = yaml_sequence_nested_end(doc, key_line, parent_end);
+        if (child_end == (size_t)-1) {
+            return YAML_ERROR; /* indentless sequence: fail closed, do not edit */
+        }
         if (depth + YAML_UNIT == sequence_path_len) {
             target->sequence_found = true;
             target->missing_index = sequence_path_len;

@@ -1197,7 +1197,75 @@ TEST(platform_readdir_skips_unrepresentable_name_and_keeps_listing) {
 }
 #endif
 
+#ifdef _WIN32
+/* Antivirus, the search indexer and cloud-sync clients briefly hold a file open. The
+ * atomic replace used by every config editor then fails (1175, sharing violation) and
+ * the edit was abandoned. It must retry until the holder lets go. */
+typedef struct {
+    HANDLE handle;
+    DWORD hold_ms;
+} replace_holder_t;
+
+static void *replace_holder_release(void *arg) {
+    replace_holder_t *holder = (replace_holder_t *)arg;
+    Sleep(holder->hold_ms);
+    CloseHandle(holder->handle);
+    return NULL;
+}
+
+TEST(platform_replace_file_retries_while_a_scanner_holds_the_destination) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/cbm_platform_replace_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    char dest[400];
+    char temp[400];
+    snprintf(dest, sizeof(dest), "%s/config.toml", dir);
+    snprintf(temp, sizeof(temp), "%s/config.toml.tmp", dir);
+    ASSERT_EQ(th_write_file(dest, "old\n"), 0);
+    ASSERT_EQ(th_write_file(temp, "new\n"), 0);
+
+    wchar_t wdest[512];
+    wchar_t wtemp[512];
+    ASSERT_GT(MultiByteToWideChar(CP_UTF8, 0, dest, -1, wdest, 512), 0);
+    ASSERT_GT(MultiByteToWideChar(CP_UTF8, 0, temp, -1, wtemp, 512), 0);
+    for (wchar_t *p = wdest; *p; p++) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+    for (wchar_t *p = wtemp; *p; p++) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+
+    /* Hold the destination with no sharing, as a scanner does, for 150 ms. */
+    replace_holder_t holder = {
+        CreateFileW(wdest, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL),
+        150};
+    ASSERT_TRUE(holder.handle != INVALID_HANDLE_VALUE);
+    cbm_thread_t releaser;
+    ASSERT_EQ(cbm_thread_create(&releaser, 0, replace_holder_release, &holder), 0);
+
+    bool replaced = cbm_win_replace_file_retry(wdest, wtemp, true);
+    ASSERT_EQ(cbm_thread_join(&releaser), 0);
+    ASSERT_TRUE(replaced);
+
+    /* A non-transient failure must not be retried for seconds. */
+    wchar_t missing[] = L"C:\\cbm-no-such-dir\\a.toml";
+    uint64_t started = cbm_now_ms();
+    ASSERT_FALSE(cbm_win_replace_file_retry(missing, wtemp, false));
+    ASSERT_LT(cbm_now_ms() - started, 500);
+
+    th_rmtree(dir);
+    PASS();
+}
+#endif
+
 SUITE(platform) {
+#ifdef _WIN32
+    RUN_TEST(platform_replace_file_retries_while_a_scanner_holds_the_destination);
+#endif
 #ifdef _WIN32
     RUN_TEST(platform_readdir_skips_unrepresentable_name_and_keeps_listing);
 #endif

@@ -580,9 +580,7 @@ static int text_replace_file(const char *temp_path, const char *path, int destin
         free(wide_path);
         return TEXT_ERROR;
     }
-    BOOL replaced = destination_exists ? ReplaceFileW(wide_path, wide_temp, NULL,
-                                                      REPLACEFILE_WRITE_THROUGH, NULL, NULL)
-                                       : MoveFileExW(wide_temp, wide_path, MOVEFILE_WRITE_THROUGH);
+    bool replaced = cbm_win_replace_file_retry(wide_path, wide_temp, destination_exists != 0);
     free(wide_temp);
     free(wide_path);
     return replaced ? TEXT_OK : TEXT_ERROR;

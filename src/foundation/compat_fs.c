@@ -128,6 +128,40 @@ cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
     return &d->entry;
 }
 
+enum { CBM_REPLACE_ATTEMPTS = 12, CBM_REPLACE_BACKOFF_MS = 15 };
+
+static bool win_replace_error_is_transient(DWORD err) {
+    switch (err) {
+    case ERROR_ACCESS_DENIED:
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+    case ERROR_UNABLE_TO_REMOVE_REPLACED:
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT:
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT_2:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool cbm_win_replace_file_retry(const wchar_t *dest, const wchar_t *temp, bool dest_exists) {
+    for (int attempt = 0; attempt < CBM_REPLACE_ATTEMPTS; attempt++) {
+        BOOL ok = dest_exists
+                      ? ReplaceFileW(dest, temp, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL)
+                      : MoveFileExW(temp, dest, MOVEFILE_WRITE_THROUGH);
+        if (ok) {
+            return true;
+        }
+        DWORD err = GetLastError();
+        if (!win_replace_error_is_transient(err) || attempt + 1 == CBM_REPLACE_ATTEMPTS) {
+            SetLastError(err);
+            return false;
+        }
+        Sleep((DWORD)(CBM_REPLACE_BACKOFF_MS * (attempt + 1)));
+    }
+    return false;
+}
+
 int cbm_path_info_utf8(const char *path, cbm_path_info_t *out) {
     if (!path || !out) {
         return CBM_PATH_INFO_UNAVAILABLE;

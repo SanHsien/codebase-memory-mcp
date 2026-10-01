@@ -29,7 +29,7 @@ notepad install.ps1   # 先看過腳本再執行
 
 ## 開發環境（本 fork）
 
-主要環境是 **Windows 11 + PowerShell**。本機沒有 C 工具鏈也能跑維護 gate；C 程式的建置與測試交給 CI（上游用 MSYS2 CLANG64）。
+主要環境是 **Windows 11 + PowerShell**。維護 gate 不需要 C 工具鏈；建置與測試 C 程式用 MSYS2 CLANG64（上游 CI 也是）。
 
 ```powershell
 git clone https://github.com/SanHsien/codebase-memory-mcp.git

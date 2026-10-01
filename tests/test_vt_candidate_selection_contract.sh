@@ -224,7 +224,23 @@ def replace_candidate_with_symlink(path: pathlib.Path) -> None:
     binary.symlink_to(target)
 
 
-expect_stage_failure("symlink", replace_candidate_with_symlink)
+def can_create_symlinks() -> bool:
+    """Windows creates symlinks only with Developer Mode or an elevated token; a
+    plain developer shell gets WinError 1314. Same SKIP convention as the other
+    symlink fixtures (tests/test_build_dir_safety.sh)."""
+    probe = fix / "symlink-probe"
+    try:
+        probe.symlink_to(fix)
+    except OSError:
+        return False
+    probe.unlink()
+    return True
+
+
+if can_create_symlinks():
+    expect_stage_failure("symlink", replace_candidate_with_symlink)
+else:
+    print("SKIP: no real symlink support here; symlink-candidate case not exercisable")
 
 
 def tamper_candidate(path: pathlib.Path) -> None:

@@ -2127,7 +2127,83 @@ TEST(config_yaml_edit_nested_sequence_rejects_symlink_byte_identically) {
 }
 #endif
 
+/* All entries of `key:` must share one indentation and include the new item; a
+ * mixed-indent list is not the list the user had. */
+static bool yaml_test_list_is_consistent(const char *text, const char *key, int items) {
+    char header[64];
+    snprintf(header, sizeof(header), "%s:\n", key);
+    const char *p = strstr(text, header);
+    if (!p) {
+        return false;
+    }
+    p += strlen(header);
+    int count = 0;
+    int indent = -1;
+    for (;;) {
+        int spaces = 0;
+        while (p[spaces] == ' ') {
+            spaces++;
+        }
+        if (p[spaces] != '-' || p[spaces + 1] != ' ') {
+            break;
+        }
+        if (indent < 0) {
+            indent = spaces;
+        } else if (indent != spaces) {
+            return false;
+        }
+        count++;
+        const char *nl = strchr(p, '\n');
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    return count == items;
+}
+
+/* PyYAML (and so Aider) writes a list under its key at column 0. The editor treated the
+ * first dash as the start of the next key and inserted our item before the user's
+ * entries, leaving them detached from the key. The edit must either keep one
+ * consistent list or refuse and leave the file untouched. */
+TEST(config_yaml_edit_column_zero_block_list_is_never_corrupted) {
+    const char *initial = "read:\n- a.md\n- b.md\nmodel: fast\n";
+    yaml_fixture_t fixture;
+    ASSERT_EQ(yaml_fixture_init(&fixture, initial), 0);
+    int result = cbm_yaml_upsert_string_list_item(fixture.path, "read", "c.md");
+    char *after = yaml_read_alloc(fixture.path);
+    ASSERT_NOT_NULL(after);
+    bool untouched = strcmp(after, initial) == 0;
+    bool consistent = result == 0 && yaml_test_list_is_consistent(after, "read", 3) &&
+                      strstr(after, "c.md") != NULL;
+    free(after);
+    th_cleanup(fixture.dir);
+    ASSERT_TRUE(untouched || consistent);
+    PASS();
+}
+
+/* Same shape under a nested key: Hermes writes `pre_llm_call:` with its dashes at the
+ * key's own indent. */
+TEST(config_yaml_edit_indentless_sequence_is_never_corrupted) {
+    const char *initial = "hooks:\n  pre_llm_call:\n  - id: \"other\"\n    type: \"command\"\n";
+    yaml_fixture_t fixture;
+    ASSERT_EQ(yaml_fixture_init(&fixture, initial), 0);
+    int result = yaml_hermes_hook_upsert(&fixture);
+    char *after = yaml_read_alloc(fixture.path);
+    ASSERT_NOT_NULL(after);
+    bool untouched = strcmp(after, initial) == 0;
+    /* If an edit was accepted, our entry must sit at the same indent as "other". */
+    bool aligned = result == CBM_YAML_IDENTITY_EDIT_OK && strstr(after, "\n  - id: \"other\"") &&
+                   strstr(after, "\n  - id: \"cbm-context\"");
+    free(after);
+    th_cleanup(fixture.dir);
+    ASSERT_TRUE(untouched || aligned);
+    PASS();
+}
+
 SUITE(config_yaml_edit) {
+    RUN_TEST(config_yaml_edit_column_zero_block_list_is_never_corrupted);
+    RUN_TEST(config_yaml_edit_indentless_sequence_is_never_corrupted);
     RUN_TEST(config_yaml_edit_serializes_two_editor_instances);
     RUN_TEST(config_yaml_edit_missing_target_appearance_fails_without_replace);
     RUN_TEST(config_yaml_edit_rejects_stale_content_and_cleans_temp);

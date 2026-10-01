@@ -15,7 +15,7 @@ pwsh -NoProfile -File tools\dev_check.ps1       # 之後
 
 gate 依序執行：compileall → ruff → pytest（`tools/tests`）→ 文件連結檢查 → 分岔登記檢查，最後印 `WINDOWS DEV CHECK GREEN`。
 
-gate 只驗維護層。C 程式碼由上游 CI 驗證（`pr.yml`、`dry-run.yml`）；本機沒有 C 工具鏈。
+gate 只驗維護層。C 程式碼用下方的 MSYS2 步驟本機驗證，也由上游 CI 驗證（`pr.yml`、`dry-run.yml`）。
 
 ## 維護工具
 

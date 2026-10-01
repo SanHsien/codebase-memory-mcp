@@ -34,7 +34,16 @@
 | `src/graph_buffer/graph_buffer.c` | `cbm_gbuf_load_from_db` 不檢查 `sqlite3_step` 結束碼、不檢查 id 是否為負 | 讀取未以 SQLITE_DONE 結束就回傳失敗；負 id 不寫入重新對應表 | 讀取中途失敗會得到被截斷的圖並被後續寫回覆蓋資料庫；負 id 造成越界寫入（無法以測試重現，屬防禦性修正） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_graph_buffer.c` | — | 新增負節點 id 測試 | 對應 graph_buffer.c 修正（修正前也通過，僅作冒煙測試） | 隨 graph_buffer.c 一起處理 |
 | `scripts/setup-windows.ps1` | 下載 zip 後不驗證即解壓並設為 MCP 命令 | 下載 `checksums.txt` 並比對 SHA-256，不符即中止；暫存改用隨機目錄 | `irm \| iex` 推薦路徑沒有任何完整性檢查 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/foundation/compat_fs.c` | Windows `cbm_readdir` 遇到無法轉成 UTF-8 的檔名就結束整個目錄列舉 | 略過該項目並繼續列舉 | NTFS 允許孤立代理字元檔名；其後所有檔案從索引中靜默消失 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `tests/test_platform.c` | — | 新增孤立代理字元檔名的列舉測試 | 對應 compat_fs.c 修正 | 隨 compat_fs.c 一起處理 |
+| `src/foundation/compat_fs.c` | Windows `cbm_readdir` 遇到無法轉成 UTF-8 的檔名就結束整個目錄列舉 | 略過該項目並繼續列舉；新增 `cbm_win_replace_file_retry`（暫時性共享衝突時重試的原子取代） | NTFS 允許孤立代理字元檔名，其後檔案從索引消失；掃描程式短暫鎖檔會讓 ReplaceFileW 回 1175，設定檔寫入隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_platform.c` | — | 新增孤立代理字元檔名列舉測試、掃描程式鎖檔時取代重試測試 | 對應 compat_fs.c 修正 | 隨 compat_fs.c 一起處理 |
 | `src/main.c` | `daemon --port=` 以 `atoi` 解析 | 改用 `strtol` 並檢查結尾與範圍 | `80abc` 被當成 80；溢位為未定義行為 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/ui/httpd.c` | Windows 設定 `SO_EXCLUSIVEADDRUSE` 失敗時仍繼續 bind | 失敗即關閉 socket 並回傳 NULL | 失敗會退回一般 bind，其他本機使用者可搶佔連接埠 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/foundation/compat_fs.h` | — | 宣告 `cbm_win_replace_file_retry`（Windows） | 供四個設定檔編輯器共用 | 隨 compat_fs.c 一起處理 |
+| `src/cli/config_text_edit.c` | Windows 以 `ReplaceFileW`／`MoveFileExW` 取代，失敗即放棄 | 改呼叫 `cbm_win_replace_file_retry` | 掃描程式或索引器短暫握住檔案時（錯誤 1175）安裝／解除安裝隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/cli/config_json_like.c` | 同上 | 同上 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/cli/config_toml_edit.c` | 同上；Codex 執行檔檢查拒絕任何空白 | 同上；單引號內的空白視為路徑的一部分 | `C:\Program Files\…`、`C:\Users\John Doe\…` 下 Codex hooks 永遠裝不起來 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/cli/config_yaml_edit.c` | 同上；縮排式序列（`key:` 下的 dash 與 key 同縮排）被當成區段終點 | 同上；遇到該形式回傳錯誤、不修改檔案 | Hermes（PyYAML 預設輸出）設定檔會被插入到原項目之前而損毀 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_config_yaml_edit.c` | — | 新增兩個「不得損毀」測試 | 對應 config_yaml_edit.c 修正 | 隨 config_yaml_edit.c 一起處理 |
+| `tests/test_config_toml_edit.c` | — | 新增含空白安裝路徑測試 | 對應 config_toml_edit.c 修正 | 隨 config_toml_edit.c 一起處理 |
+| `tests/test_version_metadata_contract.sh` | scoop 套件登記為 `pin:0.11.0` 並附 PIN_REASONS | 改為 `release` 規則、刪除該 PIN_REASONS 項 | 契約本身要求「釘在最新 release 的套件改用 release 規則」，tag 存在時（本機、fork）會失敗 | 上游自己處理 scoop 時採用上游版本並刪本列 |
+| `tests/test_vt_candidate_selection_contract.sh` | 無條件建立符號連結測試案例 | 先探測能否建立符號連結，不能就略過該案例 | Windows 非管理員／未開開發人員模式時 `os.symlink` 回 WinError 1314，整個契約無法執行 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |

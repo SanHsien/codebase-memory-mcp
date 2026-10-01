@@ -1600,9 +1600,7 @@ static int jl_replace_atomic(const char *temp_path, const char *path, bool desti
     }
     /* ReplaceFileW retains the destination's ACL and other mergeable metadata;
      * refusing merge errors is safer than silently dropping that metadata. */
-    BOOL replaced = destination_exists ? ReplaceFileW(wide_path, wide_temp, NULL,
-                                                      REPLACEFILE_WRITE_THROUGH, NULL, NULL)
-                                       : MoveFileExW(wide_temp, wide_path, MOVEFILE_WRITE_THROUGH);
+    bool replaced = cbm_win_replace_file_retry(wide_path, wide_temp, destination_exists != 0);
     free(wide_temp);
     free(wide_path);
     return replaced ? 0 : -1;

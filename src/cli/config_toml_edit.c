@@ -603,9 +603,7 @@ static int toml_replace_atomic(const char *temp_path, const char *path, int exis
     }
     /* ReplaceFileW preserves the destination ACL and other mergeable metadata;
      * merge failures stay fatal so metadata is never silently discarded. */
-    BOOL replaced =
-        existed ? ReplaceFileW(wide_path, wide_temp, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL)
-                : MoveFileExW(wide_temp, wide_path, MOVEFILE_WRITE_THROUGH);
+    bool replaced = cbm_win_replace_file_retry(wide_path, wide_temp, existed != 0);
     free(wide_temp);
     free(wide_path);
     return replaced ? TOML_EDIT_OK : TOML_EDIT_ERR;
@@ -2776,7 +2774,10 @@ static int toml_codex_executable_is_safe(const char *encoded, size_t len, size_t
         return 0;
     for (size_t pos = *start; pos < *end;) {
         unsigned char ch = (unsigned char)encoded[pos++];
-        if (ch < 0x21U || ch == 0x7fU || (!*start && strchr("\"'`$;&|<>(){}[]*?!", ch))) {
+        /* Inside the single quotes written by cbm_shell_quote_word a space is just part of
+         * the path (C:\Users\John Doe\..., C:\Program Files\...); unquoted it ends the word. */
+        if ((!*start && ch <= 0x20U) || ch < 0x20U || ch == 0x7fU ||
+            (!*start && strchr("\"'`$;&|<>(){}[]*?!", ch))) {
             return 0;
         }
         if (*start && ch == '\'') {

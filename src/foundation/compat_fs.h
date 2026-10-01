@@ -47,6 +47,17 @@ enum {
  * their behavior. */
 int cbm_path_info_utf8(const char *path, cbm_path_info_t *out);
 
+#ifdef _WIN32
+#include <wchar.h>
+/* Atomically replace `dest` with `temp` (ReplaceFileW when `dest_exists`, otherwise
+ * MoveFileExW), retrying with a short backoff on the errors a virus scanner, the search
+ * indexer or a cloud-sync client cause by briefly holding the file (e.g. 1175
+ * ERROR_UNABLE_TO_REMOVE_REPLACED, sharing/lock violations, access denied). Every other
+ * failure returns immediately. Returns true on success; on failure GetLastError() holds
+ * the error of the final attempt. */
+bool cbm_win_replace_file_retry(const wchar_t *dest, const wchar_t *temp, bool dest_exists);
+#endif
+
 /* Open a directory for iteration. Returns NULL on error. */
 cbm_dir_t *cbm_opendir(const char *path);
 
