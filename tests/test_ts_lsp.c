@@ -4237,7 +4237,35 @@ TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site) {
 
 /* ── Suite registration ────────────────────────────────────────────────────── */
 
+/* A deeply nested file must not make indexing crawl: past CBM_LSP_MAX_WALK_DEPTH (512) the
+ * walk skips the subtree. A call at ordinary depth still resolves; one buried 600 levels
+ * down stays unresolved instead of costing minutes of work. */
+TEST(tslsp_walk_depth_cap_skips_pathologically_nested_calls) {
+    enum { DEPTH = 600 };
+    size_t cap = 400 + (size_t)DEPTH * 24;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t n = (size_t)snprintf(src, cap, "function shallow() {}\nfunction deep() {}\n"
+                                         "function f(a: number) {\nshallow();\n");
+    for (int i = 0; i < DEPTH; i++) {
+        n += (size_t)snprintf(src + n, cap - n, "if (a) {\n");
+    }
+    n += (size_t)snprintf(src + n, cap - n, "deep();\n");
+    for (int i = 0; i < DEPTH; i++) {
+        n += (size_t)snprintf(src + n, cap - n, "}\n");
+    }
+    snprintf(src + n, cap - n, "}\n");
+    CBMFileResult *r = extract_ts(src);
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(find_resolved(r, "f", "shallow") >= 0);
+    ASSERT_TRUE(find_resolved(r, "f", "deep") < 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(ts_lsp) {
+    RUN_TEST(tslsp_walk_depth_cap_skips_pathologically_nested_calls);
     /* Smoke (Phase 1) */
     RUN_TEST(tslsp_smoke_empty_file);
     RUN_TEST(tslsp_smoke_minimal_function);

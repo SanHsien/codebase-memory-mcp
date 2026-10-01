@@ -9500,7 +9500,16 @@ char *cbm_adr_splice_section(const char *content, const char *name, const char *
             ws--;
         }
         size_t ws_len = find.body_end - ws;
-        size_t total = find.body_start + body_len + ws_len + (doc_len - find.body_end);
+        /* A heading with an empty body has body_start at the next heading (or at EOF
+         * with no newline after the heading). Writing the body straight there would
+         * glue it onto that heading, so add the document's own line break. */
+        const char *doc_eol = adr_dominant_eol(doc, doc_len);
+        size_t doc_eol_len = strlen(doc_eol);
+        bool glue_before =
+            body_len > 0 && find.body_start > 0 && doc[find.body_start - SKIP_ONE] != '\n';
+        bool glue_after = body_len > 0 && ws_len == 0 && find.body_end < doc_len;
+        size_t total = find.body_start + body_len + ws_len + (doc_len - find.body_end) +
+                       (glue_before ? doc_eol_len : 0) + (glue_after ? doc_eol_len : 0);
         out = malloc(total + SKIP_ONE);
         if (!out) {
             return NULL;
@@ -9508,8 +9517,16 @@ char *cbm_adr_splice_section(const char *content, const char *name, const char *
         size_t at = 0;
         memcpy(out, doc, find.body_start);
         at += find.body_start;
+        if (glue_before) {
+            memcpy(out + at, doc_eol, doc_eol_len);
+            at += doc_eol_len;
+        }
         memcpy(out + at, body, body_len);
         at += body_len;
+        if (glue_after) {
+            memcpy(out + at, doc_eol, doc_eol_len);
+            at += doc_eol_len;
+        }
         memcpy(out + at, doc + ws, ws_len);
         at += ws_len;
         memcpy(out + at, doc + find.body_end, doc_len - find.body_end);

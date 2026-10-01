@@ -1109,6 +1109,17 @@ TEST(adr_splice_matches_headings_across_line_endings) {
 }
 
 /* The original use case: add an entry under its own heading. */
+/* A section whose body is empty has its body_start at the next heading (or at EOF). Splicing
+ * new text there used to glue it onto the neighbouring heading, renaming a section. */
+TEST(adr_splice_into_empty_section_keeps_headings_on_their_own_lines) {
+    CHECK_SPLICE("## PURPOSE\n## STACK\nBar", "PURPOSE", "New",
+                 "## PURPOSE\nNew\n## STACK\nBar");
+    CHECK_SPLICE("## PURPOSE", "PURPOSE", "New", "## PURPOSE\nNew");
+    CHECK_SPLICE("## PURPOSE\r\n## STACK\r\nBar", "PURPOSE", "New",
+                 "## PURPOSE\r\nNew\r\n## STACK\r\nBar");
+    PASS();
+}
+
 TEST(adr_splice_appends_arbitrary_heading) {
     CHECK_SPLICE("## PURPOSE\nFoo", "DECISIONS", "- Chose SQLite.",
                  "## PURPOSE\nFoo\n\n## DECISIONS\n- Chose SQLite.");
@@ -1720,6 +1731,7 @@ SUITE(store_arch) {
     RUN_TEST(adr_splice_preserves_line_endings);
     RUN_TEST(adr_splice_mixed_line_endings);
     RUN_TEST(adr_splice_matches_headings_across_line_endings);
+    RUN_TEST(adr_splice_into_empty_section_keeps_headings_on_their_own_lines);
     RUN_TEST(adr_splice_appends_arbitrary_heading);
     RUN_TEST(adr_splice_is_idempotent);
     RUN_TEST(adr_splice_matches_case_exactly);

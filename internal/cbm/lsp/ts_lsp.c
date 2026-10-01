@@ -183,6 +183,7 @@ extern const TSLanguage *tree_sitter_javascript(void);
 
 static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, const char *module_qn);
 static void process_node(TSLSPContext *ctx, TSNode node);
+static void process_node_inner(TSLSPContext *ctx, TSNode node);
 static void process_function_body(TSLSPContext *ctx, TSNode body, const char *func_qn,
                                   const char *class_qn);
 static const CBMType *type_of_identifier(TSLSPContext *ctx, const char *name);
@@ -3274,7 +3275,21 @@ static void process_namespace_member(TSLSPContext *ctx, TSNode node) {
     process_node(ctx, node);
 }
 
+/* Depth-guarded entry, as in go_lsp/java_lsp/py_lsp/c_lsp: the walk recurses once per
+ * nesting level, and the cost per level grows with depth, so a deeply nested file made
+ * indexing take minutes (8000 nested `if`s: 24 s; 30000: no finish in 5 min) and risks
+ * the native stack. Past CBM_LSP_MAX_WALK_DEPTH the subtree is skipped; its calls stay
+ * unresolved, which is graceful degradation. */
 static void process_node(TSLSPContext *ctx, TSNode node) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth()) {
+        return;
+    }
+    ctx->walk_depth++;
+    process_node_inner(ctx, node);
+    ctx->walk_depth--;
+}
+
+static void process_node_inner(TSLSPContext *ctx, TSNode node) {
     if (!ctx || ts_node_is_null(node))
         return;
     const char *kind = ts_node_type(node);

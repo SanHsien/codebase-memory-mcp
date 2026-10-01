@@ -56,10 +56,11 @@ typedef struct {
     bool jsx_mode;
     bool dts_mode;
     bool cross_file_mode; // project-wide registry is available for exact reference proof
-    bool strict; // tsconfig "strict": true → fewer implicit-any fallbacks
-    bool debug;  // CBM_LSP_DEBUG env
+    bool strict;          // tsconfig "strict": true → fewer implicit-any fallbacks
+    bool debug;           // CBM_LSP_DEBUG env
 
     // Recursion guard for ts_eval_expr_type (mirrors c_lsp).
+    int walk_depth; /* process_node self-recursion (AST nesting), see cbm_lsp_max_walk_depth */
     int eval_depth;
     // Expression-type memo: node.id -> evaluated type (lazily created on the
     // first completed eval; see TsEvalMemo in ts_lsp.c). Kills the exponential
