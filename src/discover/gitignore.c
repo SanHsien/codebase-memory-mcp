@@ -96,6 +96,17 @@ static bool glob_match_star(const char *pat, const char *str,
     }
 }
 
+/* git sets core.ignorecase on Windows (and macOS), where `Build/` also ignores `build/`
+ * and `*.LOG` ignores `app.log`. Matching exactly the way git does keeps the index
+ * from picking up files git already ignores. POSIX stays case-sensitive. */
+static char gi_fold(char c) {
+#ifdef _WIN32
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+#else
+    return c;
+#endif
+}
+
 /* Match a [...] character class at current position.
  * Returns true if matched. Advances *pat_out past the closing ']'. */
 static bool glob_match_charclass(const char *pat, char ch, const char **pat_out) {
@@ -109,13 +120,13 @@ static bool glob_match_charclass(const char *pat, char ch, const char **pat_out)
     while (*pat && *pat != ']') {
         if (*pat == '-' && prev && pat[GI_CHAR_IDX1] && pat[GI_CHAR_IDX1] != ']') {
             pat++;
-            if (ch >= prev && ch <= *pat) {
+            if (gi_fold(ch) >= gi_fold(prev) && gi_fold(ch) <= gi_fold(*pat)) {
                 matched = true;
             }
             prev = *pat;
             pat++;
         } else {
-            if (ch == *pat) {
+            if (gi_fold(ch) == gi_fold(*pat)) {
                 matched = true;
             }
             prev = *pat;
@@ -178,7 +189,7 @@ static bool glob_match(const char *pat, const char *str,
             continue;
         }
 
-        if (*pat != *str) {
+        if (gi_fold(*pat) != gi_fold(*str)) {
             return false;
         }
         pat++;

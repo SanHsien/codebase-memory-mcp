@@ -334,7 +334,28 @@ TEST(gi_doublestar_backtracking_terminates) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* On Windows git matches ignore patterns case-insensitively (core.ignorecase=true). */
+TEST(gi_case_sensitivity_follows_git_on_the_platform) {
+    cbm_gitignore_t *gi = cbm_gitignore_parse("Build/\n*.LOG\n[A-C]x.tmp\n");
+    ASSERT_NOT_NULL(gi);
+    /* identical case always matches */
+    ASSERT_TRUE(cbm_gitignore_matches(gi, "Build", true));
+    ASSERT_TRUE(cbm_gitignore_matches(gi, "src/app.LOG", false));
+#ifdef _WIN32
+    ASSERT_TRUE(cbm_gitignore_matches(gi, "build", true));
+    ASSERT_TRUE(cbm_gitignore_matches(gi, "src/app.log", false));
+    ASSERT_TRUE(cbm_gitignore_matches(gi, "bx.tmp", false));
+#else
+    ASSERT_FALSE(cbm_gitignore_matches(gi, "build", true));
+    ASSERT_FALSE(cbm_gitignore_matches(gi, "src/app.log", false));
+    ASSERT_FALSE(cbm_gitignore_matches(gi, "bx.tmp", false));
+#endif
+    cbm_gitignore_free(gi);
+    PASS();
+}
+
 SUITE(gitignore) {
+    RUN_TEST(gi_case_sensitivity_follows_git_on_the_platform);
     RUN_TEST(gi_doublestar_backtracking_terminates);
     RUN_TEST(gi_empty_pattern);
     RUN_TEST(gi_exact_file);

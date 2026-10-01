@@ -11,14 +11,14 @@
 | `README.md` | 英文 README | 改寫為繁中精簡入口 | 公開入口以繁中為主；原文保留在 `README.en.md` | 把上游新增的產品事實（工具數、語言數、安裝指令）併入本檔，不整份覆蓋 |
 | `README.en.md` | 不存在（原文就是 `README.md`） | 上游 `README.md` 原文，第一行換成語言切換列 | 保留英文原文 | 用上游新版全文覆蓋，再把第一行換回語言切換列 |
 | `.gitignore` | 上游忽略規則 | 尾端加 `# --- fork ---` 區塊：`!CHANGELOG.md` 與本機 gate 產物 | 上游忽略 `CHANGELOG.md`，但本 fork 的 `CHANGELOG.md` 需入版控；gate 會產生 `.venv/` 等檔 | 上游新增規則併在 fork 區塊之上；上游若自己處理同一項，刪掉重複行 |
-| `src/cypher/cypher.c` | `cross_join_with_rels` 對 1 格緩衝區逐列寫入；WHERE 的 AND/OR/XOR 鏈與 UNION 分支無長度上限；交叉連接只擋 INT_MAX | 改用 `binding_out_append`；AND/OR/XOR 上限 4096、UNION 上限 64；交叉連接中間列數上限 25 萬 | heap overflow；數十萬個 AND 使評估遞迴 stack overflow；`MATCH (a) MATCH (b)` 可耗盡記憶體（皆有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/cypher/cypher.c` | WHERE 的 AND/OR/XOR 鏈與 UNION 分支無長度上限；交叉連接只擋 INT_MAX | AND/OR/XOR 上限 4096、UNION 上限 64；交叉連接中間列數上限 25 萬 | 數十萬個 AND 使評估遞迴 stack overflow（ASan 實測崩潰）；`MATCH (a) MATCH (b)` 可耗盡記憶體（皆有回歸測試）。OPTIONAL MATCH 的 heap overflow 上游已自己修好（2026-10 同步時採用上游版本） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/foundation/compat.h` | Windows `cbm_setenv` 先呼叫 `_putenv_s`，失敗就整個返回 | `_putenv_s` 失敗（ANSI 碼頁無法表示的字元，EILSEQ）不再中止，仍以寬字元 API 設定 | UTF-8 環境變數在非 UTF-8 碼頁的 Windows 上設定失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/ui/http_server.c` | `/api/index` 以截斷後的路徑建索引、回應與 `/api/browse`、日誌輸出未完整跳脫 | 拒絕超過 job slot 的路徑；補跳脫；補一處 doc 洩漏 | 截斷可繞過工作區邊界；Windows 路徑的回應不是合法 JSON | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/watcher/watcher.c` | 用窄字元 `stat()` 處理 UTF-8 路徑；根目錄 ENOENT 一律視為已刪除 | 新增 `watcher_stat`（Windows 走寬字元 API）；磁碟機不存在（拔除的隨身碟、斷線的網路磁碟）或 UNC 路徑時視為「不確定」而非已刪除 | 中文路徑下 watcher 靜默失效；磁碟機拔除超過寬限期後索引資料庫被刪除 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/lsp/rust_cargo.c` | `members` 陣列遇到未加引號的項目無限迴圈 | 該輪未前進時強制前進一個字元 | 畸形 Cargo.toml 使索引 worker 卡死 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/cbm.c` | Perl 巢狀過深的早退未記 `mark_done` | 補 `cbm_index_mark_done` | 正常略過被 supervisor 誤判為 crash 嫌疑 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `scripts/ci/new-protected-temp-root.ps1` | 以 `Set-Acl` 設定 ACL | 改用 `DirectoryInfo.SetAccessControl` | `Set-Acl` 需要 SeSecurityPrivilege，非管理員無法執行測試 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `tests/test_cypher.c` | — | 新增 OPTIONAL MATCH 空標籤、長 AND 鏈、長 UNION 鏈測試；交叉連接上限斷言 | 對應 cypher.c 修正 | 隨 cypher.c 一起處理 |
+| `tests/test_cypher.c` | — | 新增長 AND 鏈、長 UNION 鏈測試；交叉連接上限斷言 | 對應 cypher.c 修正 | 隨 cypher.c 一起處理 |
 | `tests/test_httpd.c` | — | 新增兩個 index 回歸測試 | 對應 http_server.c 修正 | 隨 http_server.c 一起處理 |
 | `tests/test_watcher.c` | — | 新增非 ASCII 根目錄測試、磁碟機不存在不修剪測試 | 對應 watcher.c 修正 | 隨 watcher.c 一起處理 |
 | `tests/test_rust_lsp.c` | — | 新增畸形 `members` 測試 | 對應 rust_cargo.c 修正 | 隨 rust_cargo.c 一起處理 |
@@ -41,7 +41,7 @@
 | `src/foundation/compat_fs.h` | — | 宣告 `cbm_win_replace_file_retry`（Windows） | 供四個設定檔編輯器共用 | 隨 compat_fs.c 一起處理 |
 | `src/cli/config_text_edit.c` | Windows 以 `ReplaceFileW`／`MoveFileExW` 取代，失敗即放棄 | 改呼叫 `cbm_win_replace_file_retry` | 掃描程式或索引器短暫握住檔案時（錯誤 1175）安裝／解除安裝隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/cli/config_json_like.c` | 同上 | 同上 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/cli/config_toml_edit.c` | 同上；Codex 執行檔檢查拒絕任何空白 | 同上；單引號內的空白視為路徑的一部分 | `C:\Program Files\…`、`C:\Users\John Doe\…` 下 Codex hooks 永遠裝不起來 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/cli/config_toml_edit.c` | Windows 以 `ReplaceFileW`／`MoveFileExW` 取代，失敗即放棄 | 改呼叫 `cbm_win_replace_file_retry` | 掃描程式或索引器短暫握住檔案時（錯誤 1175）安裝／解除安裝隨機失敗。Codex 路徑含空白的問題上游已自己修好（採用上游版本） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/cli/config_yaml_edit.c` | 同上；縮排式序列（`key:` 下的 dash 與 key 同縮排）被當成區段終點 | 同上；遇到該形式回傳錯誤、不修改檔案 | Hermes（PyYAML 預設輸出）設定檔會被插入到原項目之前而損毀 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_config_yaml_edit.c` | — | 新增兩個「不得損毀」測試 | 對應 config_yaml_edit.c 修正 | 隨 config_yaml_edit.c 一起處理 |
 | `tests/test_config_toml_edit.c` | — | 新增含空白安裝路徑測試 | 對應 config_toml_edit.c 修正 | 隨 config_toml_edit.c 一起處理 |
@@ -52,3 +52,5 @@
 | `internal/cbm/lsp/ts_lsp.c` | TS／JS 的 `process_node` 遞迴沒有深度上限（Go、Java、Python、C 的 LSP 都有） | 加入 `walk_depth` 守門（`CBM_LSP_MAX_WALK_DEPTH`，預設 512），超過就略過該子樹 | 8000 層巢狀 `if` 的索引 25 秒、30000 層超過 5 分鐘不完成，且有棧溢位風險（ASan 單元測試 600 層即崩潰） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/lsp/ts_lsp.h` | — | `TSLSPContext` 新增 `walk_depth` | 供 ts_lsp.c 的守門使用 | 隨 ts_lsp.c 一起處理 |
 | `tests/test_ts_lsp.c` | — | 新增深度守門測試 | 對應 ts_lsp.c 修正 | 隨 ts_lsp.c 一起處理 |
+| `src/discover/gitignore.c` | `.gitignore` 比對區分大小寫 | Windows 上不分大小寫（與 `core.ignorecase=true` 的 git 一致） | `Build/` 在 Windows 的 git 會忽略 `build/`，索引卻會收進去（以真實 git 驗證） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_gitignore.c` | — | 新增大小寫比對測試 | 對應 gitignore.c 修正 | 隨 gitignore.c 一起處理 |
