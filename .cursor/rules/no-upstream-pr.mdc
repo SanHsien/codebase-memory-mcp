@@ -1,0 +1,20 @@
+---
+description: PR、push、release 一律指向 SanHsien/codebase-memory-mcp；回貢上游需要當次明確同意
+alwaysApply: true
+---
+
+# 對外只打本 fork
+
+PR、push、release 一律指向 `SanHsien/codebase-memory-mcp`，不要打向上游 `DeusData/codebase-memory-mcp`。
+
+`gh` 在 fork clone 的預設 repo 是上游，先設定並確認：
+
+```powershell
+gh repo set-default SanHsien/codebase-memory-mcp
+gh repo set-default --view    # 必須回 SanHsien/codebase-memory-mcp
+gh pr create --repo SanHsien/codebase-memory-mcp --base main --head <分支>
+```
+
+建完檢查輸出的 URL，owner 必須是 `SanHsien`。
+
+唯一例外：維護者在當次對話明確同意回貢上游。不要 push 到 `upstream` remote、不要 force-push `main`、不要刪 `upstream` remote。
