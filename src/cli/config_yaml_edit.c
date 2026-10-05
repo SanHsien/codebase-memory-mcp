@@ -380,6 +380,35 @@ static int yaml_flock_nointr(int descriptor, int operation) {
 }
 #endif
 
+#ifdef _WIN32
+/* The Windows lock is a directory that only a clean release removes. A crash or kill
+ * leaves it behind and every later edit (install and uninstall alike) fails for good.
+ * An edit takes milliseconds, so a lock directory untouched for minutes is dead. Only a
+ * plain directory that is old enough is removed; a live holder's fresh lock never is. */
+enum { YAML_STALE_LOCK_SECONDS = 300 };
+
+static bool yaml_reap_stale_lock(const wchar_t *wide_path) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(wide_path, GetFileExInfoStandard, &data) ||
+        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return false;
+    }
+    FILETIME now_ft;
+    GetSystemTimeAsFileTime(&now_ft);
+    ULARGE_INTEGER now;
+    ULARGE_INTEGER written;
+    now.LowPart = now_ft.dwLowDateTime;
+    now.HighPart = now_ft.dwHighDateTime;
+    written.LowPart = data.ftLastWriteTime.dwLowDateTime;
+    written.HighPart = data.ftLastWriteTime.dwHighDateTime;
+    if (now.QuadPart < written.QuadPart ||
+        (now.QuadPart - written.QuadPart) < (ULONGLONG)YAML_STALE_LOCK_SECONDS * 10000000ULL) {
+        return false;
+    }
+    return RemoveDirectoryW(wide_path) != 0;
+}
+#endif
 static int yaml_lock_acquire(const char *path, yaml_config_lock_t *lock) {
     memset(lock, 0, sizeof(*lock));
 #ifdef _WIN32
@@ -398,7 +427,9 @@ static int yaml_lock_acquire(const char *path, yaml_config_lock_t *lock) {
         lock->path = NULL;
         return YAML_ERROR;
     }
-    if (!CreateDirectoryW(wide_path, NULL)) {
+    if (!CreateDirectoryW(wide_path, NULL) &&
+        !(GetLastError() == ERROR_ALREADY_EXISTS && yaml_reap_stale_lock(wide_path) &&
+          CreateDirectoryW(wide_path, NULL))) {
         free(wide_path);
         free(lock->path);
         lock->path = NULL;

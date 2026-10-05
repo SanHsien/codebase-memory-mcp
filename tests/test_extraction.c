@@ -11,6 +11,7 @@
 #include "preprocessor.h"             /* cbm_export_macro_candidates (#1989) */
 #include "../src/foundation/compat.h" /* cbm_clock_gettime (wide-flat scaling guard) */
 #include "../src/foundation/compat_fs.h"
+#include "../src/foundation/platform.h" /* cbm_now_ms */
 #include <time.h>
 #include "macro_table.h"
 #include "result_spill.h"
@@ -4954,10 +4955,11 @@ TEST(swift_non_url_constructor_untouched_issue1892) {
  * the per-file constant map and resolved at the call site, for both return
  * statements and arrow expression bodies. */
 TEST(extract_ts_await_generic_call_issue2210) {
-    CBMFileResult *r = extract("function parseJsonBody<T>() { return {} as T; }\n"
-                               "async function plain() { return await parseJsonBody(); }\n"
-                               "async function generic() { return await parseJsonBody<string>(); }\n",
-                               CBM_LANG_TYPESCRIPT, "t", "await.ts");
+    CBMFileResult *r =
+        extract("function parseJsonBody<T>() { return {} as T; }\n"
+                "async function plain() { return await parseJsonBody(); }\n"
+                "async function generic() { return await parseJsonBody<string>(); }\n",
+                CBM_LANG_TYPESCRIPT, "t", "await.ts");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_EQ(count_calls_named(r, "parseJsonBody"), 2);
@@ -8863,7 +8865,42 @@ TEST(extract_walk_truncated_when_a_node_budget_is_set) {
     PASS();
 }
 
+/* A chain of macros that each expand to two of the previous one makes 2^N tokens from a
+ * few hundred bytes. simplecpp has no limit, so indexing such a file used to run for
+ * minutes (2^22 tokens: more than two minutes). The budget guard skips expansion; the
+ * file is still parsed and its real definitions are still found. A modest macro file
+ * must still be expanded as before. */
+TEST(extract_c_skips_exponential_macro_expansion) {
+    enum { DEPTH = 28 };
+    char src[4096];
+    size_t n = (size_t)snprintf(src, sizeof(src), "#define A0 x x\n");
+    for (int i = 1; i <= DEPTH; i++) {
+        n += (size_t)snprintf(src + n, sizeof(src) - n, "#define A%d A%d A%d\n", i, i - 1, i - 1);
+    }
+    snprintf(src + n, sizeof(src) - n, "int v = A%d;\nint real_function(void) { return 1; }\n",
+             DEPTH);
+    uint64_t started = cbm_now_ms();
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_C, "t", "bomb.c", 0, NULL, NULL);
+    uint64_t elapsed = cbm_now_ms() - started;
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT(elapsed, 20000);
+    ASSERT_TRUE(find_def_by_name(r, "real_function") != NULL);
+    cbm_free_result(r);
+
+    /* a normal macro file is unaffected */
+    const char *normal = "#define SQUARE_ONE 1 1\n#define BOTH SQUARE_ONE SQUARE_ONE\n"
+                         "int w = BOTH;\nint other_function(void) { return w; }\n";
+    CBMFileResult *r2 =
+        cbm_extract_file(normal, (int)strlen(normal), CBM_LANG_C, "t", "ok.c", 0, NULL, NULL);
+    ASSERT_NOT_NULL(r2);
+    ASSERT_TRUE(find_def_by_name(r2, "other_function") != NULL);
+    cbm_free_result(r2);
+    PASS();
+}
+
 SUITE(extraction) {
+    RUN_TEST(extract_c_skips_exponential_macro_expansion);
     RUN_TEST(extract_compact_keeps_every_field_and_shrinks_the_arena);
     RUN_TEST(extract_compact_is_idempotent_and_survives_empty_results);
     RUN_TEST(extract_spill_round_trip_keeps_every_field);

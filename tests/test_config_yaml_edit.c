@@ -2254,7 +2254,69 @@ TEST(config_yaml_edit_indentless_sequence_is_never_corrupted) {
     PASS();
 }
 
+#ifdef _WIN32
+/* The Windows lock is a directory removed only by a clean release. After a crash it stayed
+ * forever and every later YAML edit failed. A lock that has been untouched for minutes is
+ * dead and must not block the edit; a fresh one still must. */
+static void yaml_test_make_lock_dir(const char *lock_path, bool old) {
+    wchar_t wide[1024];
+    MultiByteToWideChar(CP_UTF8, 0, lock_path, -1, wide, 1024);
+    for (wchar_t *p = wide; *p; p++) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+    CreateDirectoryW(wide, NULL);
+    if (old) {
+        HANDLE h = CreateFileW(wide, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            ULARGE_INTEGER t;
+            t.LowPart = ft.dwLowDateTime;
+            t.HighPart = ft.dwHighDateTime;
+            t.QuadPart -= (ULONGLONG)3600 * 10000000ULL; /* one hour ago */
+            ft.dwLowDateTime = t.LowPart;
+            ft.dwHighDateTime = t.HighPart;
+            SetFileTime(h, NULL, NULL, &ft);
+            CloseHandle(h);
+        }
+    }
+}
+
+TEST(config_yaml_edit_reaps_a_stale_windows_lock_but_honours_a_fresh_one) {
+    yaml_fixture_t fixture;
+    ASSERT_EQ(yaml_fixture_init(&fixture, "model: fast\n"), 0);
+    char lock_path[1024];
+    ASSERT(snprintf(lock_path, sizeof(lock_path), "%s.cbm-yaml.lock", fixture.path) > 0);
+
+    yaml_test_make_lock_dir(lock_path, false); /* a live holder */
+    ASSERT_EQ(cbm_yaml_upsert_string_list_item(fixture.path, "read", "AGENTS.md"), -1);
+
+    wchar_t wide[1024];
+    MultiByteToWideChar(CP_UTF8, 0, lock_path, -1, wide, 1024);
+    for (wchar_t *p = wide; *p; p++) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+    RemoveDirectoryW(wide);
+    yaml_test_make_lock_dir(lock_path, true); /* left behind by a crash an hour ago */
+    ASSERT_EQ(cbm_yaml_upsert_string_list_item(fixture.path, "read", "AGENTS.md"), 0);
+    char *after = yaml_read_alloc(fixture.path);
+    ASSERT_NOT_NULL(after);
+    ASSERT_NOT_NULL(strstr(after, "AGENTS.md"));
+    free(after);
+    th_cleanup(fixture.dir);
+    PASS();
+}
+#endif
+
 SUITE(config_yaml_edit) {
+#ifdef _WIN32
+    RUN_TEST(config_yaml_edit_reaps_a_stale_windows_lock_but_honours_a_fresh_one);
+#endif
     RUN_TEST(config_yaml_edit_column_zero_block_list_is_never_corrupted);
     RUN_TEST(config_yaml_edit_indentless_sequence_is_never_corrupted);
     RUN_TEST(config_yaml_edit_serializes_two_editor_instances);

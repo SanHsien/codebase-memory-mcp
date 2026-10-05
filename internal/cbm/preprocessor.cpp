@@ -11,6 +11,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <cctype>
+#include <unordered_map>
 
 extern "C" {
 
@@ -420,6 +422,109 @@ static bool build_line_map(const std::string &expanded, const std::string &main_
     return true;
 }
 
+// ── Macro-expansion budget ─────────────────────────────────────────
+// simplecpp has no limit on how many tokens a macro may expand to, so
+//   #define A0 x x
+//   #define A1 A0 A0   ...   #define A30 A29 A29
+// makes a one-kilobyte file expand to billions of tokens (measured: 2^18 tokens 9.6 s,
+// 2^22 tokens more than two minutes). simplecpp is vendored and integrity-checked, so the
+// guard lives here: estimate the expanded size of object-like macros in one pass and skip
+// preprocessing (callers then use the original source) when it would exceed the budget.
+static const unsigned long long CBM_MACRO_EXPANSION_BUDGET = 2000000ULL;
+
+static unsigned long long budget_add(unsigned long long a, unsigned long long b) {
+    unsigned long long sum = a + b;
+    unsigned long long ceiling = CBM_MACRO_EXPANSION_BUDGET * 4ULL;
+    return (sum < a || sum > ceiling) ? ceiling : sum;
+}
+
+// Token count of `text` with identifiers that are known macros replaced by their size.
+static unsigned long long estimate_tokens(
+    const char *text, size_t len,
+    const std::unordered_map<std::string, unsigned long long> &sizes) {
+    unsigned long long total = 0;
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\\') {
+            i++;
+        } else if (c == '/' && i + 1 < len && text[i + 1] == '/') {
+            break;
+        } else if (std::isalpha(c) || c == '_') {
+            size_t start = i;
+            while (i < len && (std::isalnum((unsigned char)text[i]) || text[i] == '_')) {
+                i++;
+            }
+            std::unordered_map<std::string, unsigned long long>::const_iterator it =
+                sizes.find(std::string(text + start, i - start));
+            total = budget_add(total, it == sizes.end() ? 1ULL : it->second);
+        } else if (std::isdigit(c)) {
+            while (i < len && std::isalnum((unsigned char)text[i])) {
+                i++;
+            }
+            total = budget_add(total, 1ULL);
+        } else {
+            i++;
+            total = budget_add(total, 1ULL);
+        }
+    }
+    return total;
+}
+
+static bool macro_expansion_exceeds_budget(const char *source, int source_len) {
+    std::unordered_map<std::string, unsigned long long> sizes;
+    unsigned long long used = 0;
+    size_t pos = 0;
+    size_t n = (size_t)source_len;
+    while (pos < n) {
+        size_t eol = pos;
+        // A logical line: backslash-newline continues it.
+        while (eol < n && !(source[eol] == '\n' && (eol == pos || source[eol - 1] != '\\'))) {
+            eol++;
+        }
+        const char *line = source + pos;
+        size_t len = eol - pos;
+        size_t k = 0;
+        while (k < len && (line[k] == ' ' || line[k] == '\t')) {
+            k++;
+        }
+        bool handled = false;
+        if (k < len && line[k] == '#') {
+            k++;
+            while (k < len && (line[k] == ' ' || line[k] == '\t')) {
+                k++;
+            }
+            if (len - k > 6 && strncmp(line + k, "define", 6) == 0 &&
+                (line[k + 6] == ' ' || line[k + 6] == '\t')) {
+                k += 6;
+                while (k < len && (line[k] == ' ' || line[k] == '\t')) {
+                    k++;
+                }
+                size_t name_start = k;
+                while (k < len && (std::isalnum((unsigned char)line[k]) || line[k] == '_')) {
+                    k++;
+                }
+                // Only object-like macros are estimated: `NAME(` is function-like.
+                if (k > name_start && !(k < len && line[k] == '(')) {
+                    unsigned long long size = estimate_tokens(line + k, len - k, sizes);
+                    sizes[std::string(line + name_start, k - name_start)] = size;
+                    if (size > CBM_MACRO_EXPANSION_BUDGET) {
+                        return true;
+                    }
+                }
+            }
+            handled = true; // any directive line is not a use site
+        }
+        if (!handled) {
+            used = budget_add(used, estimate_tokens(line, len, sizes));
+            if (used > CBM_MACRO_EXPANSION_BUDGET) {
+                return true;
+            }
+        }
+        pos = eol + 1;
+    }
+    return false;
+}
 CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_len,
                                                const char *filename, const char **extra_defines,
                                                const char **include_paths, int cpp_mode) {
@@ -429,6 +534,9 @@ CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_le
     if (!has_preprocessor_work(source, source_len) &&
         !has_export_macro_candidates(source, source_len)) {
         return NULL; // NULL = no expansion needed, use original
+    }
+    if (macro_expansion_exceeds_budget(source, source_len)) {
+        return NULL; // pathological macro growth: skip expansion, use original
     }
 
     try {

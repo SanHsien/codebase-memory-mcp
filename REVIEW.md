@@ -36,6 +36,7 @@
 | `MATCH (a) MATCH (b)` 交叉連接可耗盡記憶體（上限 25 萬列） | `src/cypher/cypher.c` |
 | TS／JS 深度巢狀檔案：ASan 單元測試 600 層即崩潰；真實二進位 8000 層 25 秒 → 5 秒，30000 層超過 5 分鐘 → 105 秒 | `internal/cbm/lsp/ts_lsp.c` |
 | 畸形 `Cargo.toml` 的 `members` 使索引無限迴圈 | `internal/cbm/lsp/rust_cargo.c` |
+| C 前處理器巨集展開炸彈：1 KB 檔案 2^18 個 token 要 9.6 秒、2^22 個超過 120 秒；展開前估算大小，超過 200 萬 token 就略過展開（防護放在非 vendored 的 `preprocessor.cpp`） | `internal/cbm/preprocessor.cpp` |
 | OPTIONAL MATCH 起點無節點時 heap overflow（上游同期也修了，已採用上游版本） | `src/cypher/cypher.c` |
 
 **Windows 行為錯誤**
@@ -47,6 +48,7 @@
 | `cbm_readdir` 遇到無法轉換的檔名就結束列舉，其後檔案從索引消失 | `src/foundation/compat_fs.c` |
 | `cbm_setenv` 在 ANSI 碼頁無法表示的字元上失敗 | `src/foundation/compat.h` |
 | `.gitignore` 比對區分大小寫，與 Windows 上 `core.ignorecase=true` 的 git 不一致（已用真實 git 驗證） | `src/discover/gitignore.c` |
+| YAML 編輯器在 Windows 以目錄當鎖，崩潰後永久殘留、之後每次編輯都失敗；超過 300 秒的鎖視為失效 | `src/cli/config_yaml_edit.c` |
 | Codex hooks 在安裝路徑含空白時永遠裝不起來（上游同期也修了，已採用） | `src/cli/config_toml_edit.c` |
 
 **搜尋、HTTP 介面、安裝腳本**
@@ -56,6 +58,7 @@
 | 合法 regex（`handle\w+`、`colou?r`）的搜尋漏結果（hint 計算錯誤） | `src/store/store.c` |
 | `/api/index` 路徑被截斷可繞過工作區邊界；回應與日誌 JSON 未跳脫 | `src/ui/http_server.c` |
 | `setup-windows.ps1` 下載後不驗證雜湊（實測：真檔通過，竄改／缺項／空檔皆拒絕） | `scripts/setup-windows.ps1` |
+| 範圍計數把 scope 的 `_`、`%` 當 LIKE 萬用字元（`src/my_pkg` 也計入 `src/myXpkg`） | `src/store/store.c` |
 | `--port=80abc` 被當成 80；`SO_EXCLUSIVEADDRUSE` 失敗仍 bind（無測試） | `src/main.c`、`src/ui/httpd.c` |
 | graph_buffer 讀取不檢查結束碼、負 id（防禦性，測試在修正前也通過） | `src/graph_buffer/graph_buffer.c` |
 | Perl 早退漏記 `mark_done` | `internal/cbm/cbm.c` |
@@ -74,9 +77,8 @@
 
 ## 未結
 
-- **C 前處理器巨集展開炸彈**：1 KB 的檔案，2^18 個 token 要 9.6 秒、2^22 個超過 120 秒不完成。simplecpp 沒有展開上限；它是 vendored 且受完整性檢查保護，不在此修。最終由 supervisor 的記憶體預算與 15 分鐘無進展逾時終止。
 - **`daemon_ipc` 4 個測試**在本機以預設 `LOCALAPPDATA` 失敗：`AppData\Local` 的 ACL 含 AppContainer 與 `CodexSandboxUsers`，daemon 的祖先目錄安全檢查因此拒絕。把 `LOCALAPPDATA` 換到乾淨位置後 37 個全過，確認是環境而非程式；未動安全邏輯。
 - 一個計時型測試（`daemon_ipc_windows_startup_retries_transient_rendezvous_reader`）在 24 個並行 job 下偶發失敗，單獨跑通過。
-- 審查提出但未處理：`setup.sh`（非 Windows）無雜湊驗證；OOM 時未檢查 malloc 的多處；`cbm_max_file_bytes` 在 Windows 上限 2 GiB；LIKE 萬用字元未跳脫的範圍計數；sqlite_writer 的 B-tree 根頁回傳 0 未檢查；`cbm_count_*_scoped` 讀取失敗回 0；YAML 編輯器在 Windows 以目錄當鎖、崩潰後會殘留；TOML 多行陣列內以 `[` 開頭的行被當成表頭。
+- 審查提出但未處理：`setup.sh`（非 Windows）無雜湊驗證；OOM 時未檢查 malloc 的多處；`cbm_max_file_bytes` 在 Windows 上限 2 GiB；sqlite_writer 的 B-tree 根頁回傳 0 未檢查；`cbm_count_*_scoped` 讀取失敗回 0；TOML 多行陣列內以 `[` 開頭的行被當成表頭。
 - 沒有逐行讀完：`store.c` 部分區段、多數 `extract_*.c` 細節、`pass_route_nodes.c` 後段。這些不能視為已排除。
 - 上游持續前進：本次同步到 `7d4a12c`（2026-10-02）；之後又有 7 個提交、27 個 PR、6 個 issue 待審查（`upstream-check` 會持續提示）。

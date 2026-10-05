@@ -275,7 +275,8 @@ TEST(arch_path_scoping) {
     ASSERT_TRUE(whole_pkg_nodes > scoped_pkg_nodes);
     ASSERT_EQ(scoped_pkg_nodes, 1);
 
-    ASSERT_TRUE(cbm_store_count_nodes(s, "pscope") > cbm_store_count_nodes_scoped(s, "pscope", "apps/foo"));
+    ASSERT_TRUE(cbm_store_count_nodes(s, "pscope") >
+                cbm_store_count_nodes_scoped(s, "pscope", "apps/foo"));
 
     cbm_architecture_info_t scoped_slash;
     memset(&scoped_slash, 0, sizeof(scoped_slash));
@@ -969,11 +970,11 @@ static int adr_check_splice(const char *in, const char *name, const char *body,
     return 0;
 }
 
-#define CHECK_SPLICE(in, name, body, expect)                                                       \
-    do {                                                                                           \
-        if (adr_check_splice((in), (name), (body), (expect)) != 0) {                               \
-            return 1;                                                                              \
-        }                                                                                          \
+#define CHECK_SPLICE(in, name, body, expect)                         \
+    do {                                                             \
+        if (adr_check_splice((in), (name), (body), (expect)) != 0) { \
+            return 1;                                                \
+        }                                                            \
     } while (0)
 
 /* THE acceptance property. Every document below is a case where rebuilding
@@ -1088,9 +1089,9 @@ TEST(adr_splice_mixed_line_endings) {
 TEST(adr_splice_matches_headings_across_line_endings) {
     adr_name_collect_t c;
     memset(&c, 0, sizeof(c));
-    ASSERT_EQ(cbm_adr_scan_headings("## PURPOSE\r\nFoo\r\n\r\n## STACK\r\nBar",
-                                    adr_collect_names, &c),
-              CBM_STORE_OK);
+    ASSERT_EQ(
+        cbm_adr_scan_headings("## PURPOSE\r\nFoo\r\n\r\n## STACK\r\nBar", adr_collect_names, &c),
+        CBM_STORE_OK);
     ASSERT_STR_EQ(c.buf, "[PURPOSE][STACK]");
 
     /* A fenced block with CRLF still hides its heading, and still closes. */
@@ -1112,8 +1113,7 @@ TEST(adr_splice_matches_headings_across_line_endings) {
 /* A section whose body is empty has its body_start at the next heading (or at EOF). Splicing
  * new text there used to glue it onto the neighbouring heading, renaming a section. */
 TEST(adr_splice_into_empty_section_keeps_headings_on_their_own_lines) {
-    CHECK_SPLICE("## PURPOSE\n## STACK\nBar", "PURPOSE", "New",
-                 "## PURPOSE\nNew\n## STACK\nBar");
+    CHECK_SPLICE("## PURPOSE\n## STACK\nBar", "PURPOSE", "New", "## PURPOSE\nNew\n## STACK\nBar");
     CHECK_SPLICE("## PURPOSE", "PURPOSE", "New", "## PURPOSE\nNew");
     CHECK_SPLICE("## PURPOSE\r\n## STACK\r\nBar", "PURPOSE", "New",
                  "## PURPOSE\r\nNew\r\n## STACK\r\nBar");
@@ -1684,7 +1684,32 @@ TEST(search_case_sensitive_explicit) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* A scope is a literal path prefix. `_` and `%` are LIKE wildcards, so scope `src/my_pkg`
+ * also counted `src/myXpkg/...`, and `src/a%b` counted `src/aXXb/...`. */
+TEST(store_scoped_counts_treat_like_wildcards_literally) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "wild", "/tmp/wild"), 0);
+    const char *paths[] = {"src/my_pkg/a.py", "src/myXpkg/b.py", "src/a%b/c.py", "src/aXXb/d.py"};
+    for (int i = 0; i < 4; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "wild.n%d", i);
+        cbm_node_t n = {.project = "wild",
+                        .label = "Function",
+                        .name = "f",
+                        .qualified_name = qn,
+                        .file_path = paths[i]};
+        ASSERT_GT(cbm_store_upsert_node(s, &n), 0);
+    }
+    ASSERT_EQ(cbm_store_count_nodes_scoped(s, "wild", "src/my_pkg"), 1);
+    ASSERT_EQ(cbm_store_count_nodes_scoped(s, "wild", "src/a%b"), 1);
+    ASSERT_EQ(cbm_store_count_nodes_scoped(s, "wild", "src"), 4);
+    cbm_store_close(s);
+    PASS();
+}
+
 SUITE(store_arch) {
+    RUN_TEST(store_scoped_counts_treat_like_wildcards_literally);
     /* Architecture */
     RUN_TEST(arch_get_all);
     RUN_TEST(arch_entry_points_exclude_tests);

@@ -6346,12 +6346,30 @@ static bool arch_path_prepare(const char *path, char *norm_out, size_t norm_sz, 
     if (norm_out[0] == '\0') {
         return false;
     }
-    snprintf(like_out, like_sz, "%s/%%", norm_out);
+    /* The scope is a literal path prefix, but `_` and `%` are LIKE wildcards: scope
+     * `src/my_pkg` also matched `src/myXpkg/...`. Escape them (the statements pair this
+     * with ESCAPE '\'). If the escaped form does not fit, the prefix is cut at an escape
+     * boundary, which can only widen the match, never drop a real file. */
+    size_t o = 0;
+    for (size_t r = 0; norm_out[r] != '\0'; r++) {
+        bool special = norm_out[r] == '\\' || norm_out[r] == '%' || norm_out[r] == '_';
+        size_t need = special ? 2 : 1;
+        if (o + need + 3 > like_sz) {
+            break;
+        }
+        if (special) {
+            like_out[o++] = '\\';
+        }
+        like_out[o++] = norm_out[r];
+    }
+    like_out[o++] = '/';
+    like_out[o++] = '%';
+    like_out[o] = '\0';
     return true;
 }
 
 static const char *arch_path_scope_sql(void) {
-    return " AND (file_path = ? OR file_path LIKE ?)";
+    return " AND (file_path = ? OR file_path LIKE ? ESCAPE '\\')";
 }
 
 static void arch_bind_path_scope(sqlite3_stmt *stmt, int exact_idx, int like_idx, const char *norm,
@@ -6381,7 +6399,7 @@ int cbm_store_count_nodes_scoped(cbm_store_t *s, const char *project, const char
         return cbm_store_count_nodes(s, project);
     }
     const char *sql = "SELECT COUNT(*) FROM nodes WHERE project = ?1 "
-                      "AND (file_path = ?2 OR file_path LIKE ?3);";
+                      "AND (file_path = ?2 OR file_path LIKE ?3 ESCAPE '\\');";
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
         if (stmt) {
@@ -6411,9 +6429,9 @@ int cbm_store_count_edges_scoped(cbm_store_t *s, const char *project, const char
     const char *sql =
         "SELECT COUNT(*) FROM edges e WHERE e.project = ?1 "
         "AND EXISTS (SELECT 1 FROM nodes ns WHERE ns.id = e.source_id AND ns.project = ?1 "
-        "AND (ns.file_path = ?2 OR ns.file_path LIKE ?3)) "
+        "AND (ns.file_path = ?2 OR ns.file_path LIKE ?3 ESCAPE '\\')) "
         "AND EXISTS (SELECT 1 FROM nodes nt WHERE nt.id = e.target_id AND nt.project = ?1 "
-        "AND (nt.file_path = ?2 OR nt.file_path LIKE ?3));";
+        "AND (nt.file_path = ?2 OR nt.file_path LIKE ?3 ESCAPE '\\'));";
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
         if (stmt) {
@@ -6673,9 +6691,9 @@ int cbm_store_get_schema_counts_scoped(cbm_store_t *s, const char *project, cons
         const char *esql =
             "SELECT e.type, COUNT(*) FROM edges e WHERE e.project = ?1 "
             "AND EXISTS (SELECT 1 FROM nodes ns WHERE ns.id = e.source_id AND ns.project = ?1 "
-            "AND (ns.file_path = ?2 OR ns.file_path LIKE ?3)) "
+            "AND (ns.file_path = ?2 OR ns.file_path LIKE ?3 ESCAPE '\\')) "
             "AND EXISTS (SELECT 1 FROM nodes nt WHERE nt.id = e.target_id AND nt.project = ?1 "
-            "AND (nt.file_path = ?2 OR nt.file_path LIKE ?3)) "
+            "AND (nt.file_path = ?2 OR nt.file_path LIKE ?3 ESCAPE '\\')) "
             "GROUP BY e.type ORDER BY COUNT(*) DESC;";
         sqlite3_stmt *stmt = NULL;
         if (sqlite3_prepare_v2(s->db, esql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
@@ -7154,7 +7172,7 @@ static int arch_hotspots(cbm_store_t *s, const char *project, const char *path,
                        "AND n.file_path NOT LIKE '%test%'";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf),
-                 "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3) "
+                 "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3 ESCAPE '\\') "
                  "GROUP BY n.id ORDER BY fan_in DESC LIMIT 10",
                  base);
     } else {
@@ -7492,7 +7510,7 @@ static int arch_packages(cbm_store_t *s, const char *project, const char *path,
                        "WHERE n.project=?1 AND n.label='Package'";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf),
-                 "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3) "
+                 "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3 ESCAPE '\\') "
                  "GROUP BY n.name ORDER BY cnt DESC LIMIT 15",
                  base);
     } else {
