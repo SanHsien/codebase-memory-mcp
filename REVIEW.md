@@ -13,7 +13,7 @@
 | | 通過 | 失敗 | 略過 |
 |---|---:|---:|---:|
 | 修正前（僅補齊環境） | 7726 | 78 | 68 |
-| 現在（含同步上游 90 個提交後） | 8197 | 0 | 79 |
+| 現在（同步上游到 `e71f23e` 後） | 8739 | 0 | 88 |
 
 另外：`scripts/test.sh` 的全部契約步驟通過；產品二進位回歸（watchdog、worker、scope、字串白名單等）通過。
 
@@ -70,11 +70,10 @@
 |---|---|
 | 合法 regex（`handle\w+`、`colou?r`）的搜尋漏結果（hint 計算錯誤） | `src/store/store.c` |
 | `/api/index` 路徑被截斷可繞過工作區邊界；回應與日誌 JSON 未跳脫 | `src/ui/http_server.c` |
-| `setup-windows.ps1` 下載後不驗證雜湊（實測：真檔通過，竄改／缺項／空檔皆拒絕） | `scripts/setup-windows.ps1` |
+| `setup-windows.ps1`、`setup.sh` 下載後不驗證雜湊（上游 2026-10 改由 `install.ps1`／`install.sh` 強制驗證，已採用上游版本） | `scripts/` |
 | 範圍計數把 scope 的 `_`、`%` 當 LIKE 萬用字元（`src/my_pkg` 也計入 `src/myXpkg`）；範圍計數讀取失敗回 0 | `src/store/store.c` |
 | QN 後綴查詢 `my_func` 也命中 `a.myXfunc`、`a.MY_FUNC`（`get_code_snippet` 可能回錯節點） | `src/store/store.c` |
 | 一筆壞 JSON 的 properties 讓整個架構查詢失敗 | `src/store/store.c` |
-| `setup.sh` 下載後不驗證雜湊（`tools/tests/test_setup_sh_checksum.py`） | `scripts/setup.sh` |
 | `CBM_MAX_FILE_BYTES` 超過 2 GiB（Windows 的 `long`）時反而退回 512 MiB | `src/foundation/limits.c` |
 | `--port=80abc` 被當成 80；`SO_EXCLUSIVEADDRUSE` 失敗仍 bind（無測試） | `src/main.c`、`src/ui/httpd.c` |
 | graph_buffer 讀取不檢查結束碼、負 id（防禦性，測試在修正前也通過） | `src/graph_buffer/graph_buffer.c` |
@@ -105,4 +104,4 @@
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 - 抽取器沒有逐行讀完：`extract_defs.c`、`extract_calls.c`、`extract_usages.c`、`extract_unified.c` 大部分只做模式搜尋；各語言 LSP 檔案未審。這些不能視為已排除。
-- 上游持續前進：本次同步到 `7d4a12c`（2026-10-02），之後的提交、PR、issue 由 `upstream-check` 持續提示。
+- 上游持續前進：本次同步到 `e71f23e`（2026-10-07，含 133 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-07.md`](docs/records/upstream-triage-2026-10-07.md)。

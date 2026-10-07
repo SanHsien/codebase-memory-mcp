@@ -9,4 +9,5 @@
 - **不啟用 `scripts/hooks`**：pre-commit 需要 clang／cppcheck／make。
 - **commit 加 `-s`**：上游 DCO workflow 要求 `Signed-off-by`。
 - **停用上游的排程與發佈 workflow**：`nightly-soak`、`cache-warm`、`scorecard`、`stale`、`pages`、`release`、`issue-labeler`、`label-actions`、`pr-acknowledgement`；可用 `gh workflow enable` 復原。
-- **上游 issue／PR 只在本 repo 分流**，不在上游留言或開 PR：見 [`records/upstream-triage-2026-09-29.md`](records/upstream-triage-2026-09-29.md)。
+- **上游 issue／PR 只在本 repo 分流**，不在上游留言或開 PR：見 [`records/upstream-triage-2026-09-29.md`](records/upstream-triage-2026-09-29.md)（全量）與 [`records/upstream-triage-2026-10-07.md`](records/upstream-triage-2026-10-07.md)（增量）。
+- **上游自己修好的問題採用上游版本**：2026-10-07 同步時，兩個 setup 腳本改用上游版本（上游改由 `install.sh`／`install.ps1` 強制驗證雜湊）。

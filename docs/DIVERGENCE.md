@@ -18,7 +18,6 @@
 | `internal/cbm/lsp/rust_cargo.c` | `members` 陣列遇到未加引號的項目無限迴圈 | 該輪未前進時強制前進一個字元 | 畸形 Cargo.toml 使索引 worker 卡死 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/preprocessor.cpp` | 直接交給 simplecpp 展開，巨集展開大小無上限 | 展開前單趟估算 object-like 巨集的展開 token 數，超過 200 萬就回傳 NULL（呼叫端改用原始碼） | 1 KB 檔案 `#define A1 A0 A0 …` 可展開成 2^N 個 token（2^22 超過 2 分鐘）；simplecpp 為 vendored 且有雜湊保護，故防護放在非 vendored 的此檔（有回歸測試） | 上游若自己加上展開上限，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_extraction.c` | — | 新增巨集展開炸彈測試（須在 20 秒內完成且仍找到真實函式）、正常巨集檔不受影響；Svelte 前置 script、長 Trigger 本體 JSON 測試 | 對應 preprocessor.cpp 修正 | 隨 preprocessor.cpp 一起處理 |
-| `scripts/setup.sh` | 下載 release 壓縮檔後直接解壓安裝 | 先下載同版 `checksums.txt`，SHA-256 比對唯一相符項目才安裝；缺項、衝突、不符皆中止 | 與 `setup-windows.ps1` 一致；避免安裝被竄改或不完整的檔案（`tools/tests/test_setup_sh_checksum.py`） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/foundation/limits.c` | `CBM_MAX_FILE_BYTES` 超出 `long` 範圍時回到 512 MiB 預設 | 溢位時用 `LONG_MAX` | Windows 的 `long` 為 32 位元，設定 3 GiB 反而變成 512 MiB（有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_index_resilience.c` | — | 新增 `CBM_MAX_FILE_BYTES` 溢位測試 | 對應 limits.c 修正 | 隨 limits.c 一起處理 |
 | `internal/cbm/ac.c` | `cbm_ac_build` 配置未檢查 | 任一配置失敗即釋放並回傳 NULL | 記憶體不足時 NULL 解參考（無自動測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
@@ -45,12 +44,12 @@
 | `tests/test_smoke_fixture_contract.sh` | 以 `sys.platform != "win32"` 判斷是否為原生 Windows | 同時排除 `cygwin`、`msys` | MSYS2 的 python 回報 `cygwin`，Unix 專用檢查在 Windows 上誤跑 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_venue_parity_contract.sh` | `read_text()` 未指定編碼 | 指定 `encoding="utf-8"` | 預設碼頁（如 cp950）無法解碼 UTF-8 檔案 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_release_gate_chain_contract.sh` | `read_text()` 未指定編碼 | 指定 `encoding="utf-8"` | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_select_lanes.sh` | 讀子程序輸出未指定編碼 | 指定 `encoding="utf-8"` | 非 UTF-8 碼頁（如 cp950）的 Windows 上解碼失敗，契約整步中止 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_vt_release_notes_contract.sh` | `read_text()` 未指定編碼 | 指定 `encoding="utf-8"` | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/store/store.c` | `cbm_extract_like_hints` 把 `\w`、`\d` 當字面字母、把可省略字元當必要片段；ADR 區段取代在空區段時把新內容黏到下一個標題；範圍計數把 scope 中的 `_`、`%` 當 LIKE 萬用字元；scoped 計數讀取失敗回 0；度數批次查詢超過約 2045 個 id 時型別參數綁錯位置；QN 後綴查詢以 LIKE 比對；架構查詢的 `json_extract` 未防護；ADR 段落累加在緩衝區滿後仍寫入換行；覆蓋率影子圖清空時不更新指紋；批次寫入在外層交易中會提交外層交易 | `\` 加英數視為 meta；`? * {` 前一字元不納入；`)` 後接 `? * {` 不產生 hint。ADR 取代在需要時補上文件自己的換行；scope 前綴跳脫 `\`、`%`、`_` 並加 `ESCAPE`；讀取失敗回 `CBM_STORE_ERR`（與非 scoped 版本一致）；社群 `edge_types` 檢查配置；度數分塊查詢；後綴改為跳脫的 LIKE 加精確尾端比對；`json_extract` 先經 `json_valid`；換行計入邊界檢查；所有清空路徑都寫入指紋；批次寫入加入呼叫端交易、檢查 BEGIN／COMMIT | hint 是 AND 過濾，錯誤 hint 讓合法 regex 搜尋漏結果；ADR 標題被改名；scope `src/my_pkg` 也計入 `src/myXpkg`（皆有回歸測試）；讀取失敗被當成空範圍；度數全為 0；`my_func` 查到 `a.myXfunc`；一筆壞 JSON 讓整個架構查詢失敗；堆疊緩衝區越界寫入（ASan 實測）；失敗回來後 missed 圖仍空；呼叫端無法回滾（皆有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_store_search.c` | — | 新增 hint 邊界案例斷言 | 對應 store.c 修正 | 隨 store.c 一起處理 |
 | `src/graph_buffer/graph_buffer.c` | `cbm_gbuf_load_from_db` 不檢查 `sqlite3_step` 結束碼、不檢查 id 是否為負 | 讀取未以 SQLITE_DONE 結束就回傳失敗；負 id 不寫入重新對應表 | 讀取中途失敗會得到被截斷的圖並被後續寫回覆蓋資料庫；負 id 造成越界寫入（無法以測試重現，屬防禦性修正） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_graph_buffer.c` | — | 新增負節點 id 測試 | 對應 graph_buffer.c 修正（修正前也通過，僅作冒煙測試） | 隨 graph_buffer.c 一起處理 |
-| `scripts/setup-windows.ps1` | 下載 zip 後不驗證即解壓並設為 MCP 命令 | 下載 `checksums.txt` 並比對 SHA-256，不符即中止；暫存改用隨機目錄 | `irm \| iex` 推薦路徑沒有任何完整性檢查 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/foundation/compat_fs.c` | Windows `cbm_readdir` 遇到無法轉成 UTF-8 的檔名就結束整個目錄列舉 | 略過該項目並繼續列舉；新增 `cbm_win_replace_file_retry`（暫時性共享衝突時重試的原子取代） | NTFS 允許孤立代理字元檔名，其後檔案從索引消失；掃描程式短暫鎖檔會讓 ReplaceFileW 回 1175，設定檔寫入隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_platform.c` | — | 新增孤立代理字元檔名列舉測試、掃描程式鎖檔時取代重試測試 | 對應 compat_fs.c 修正 | 隨 compat_fs.c 一起處理 |
 | `src/main.c` | `daemon --port=` 以 `atoi` 解析 | 改用 `strtol` 並檢查結尾與範圍 | `80abc` 被當成 80；溢位為未定義行為 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
@@ -69,5 +68,5 @@
 | `internal/cbm/lsp/ts_lsp.c` | TS／JS 的 `process_node` 遞迴沒有深度上限（Go、Java、Python、C 的 LSP 都有） | 加入 `walk_depth` 守門（`CBM_LSP_MAX_WALK_DEPTH`，預設 512），超過就略過該子樹 | 8000 層巢狀 `if` 的索引 25 秒、30000 層超過 5 分鐘不完成，且有棧溢位風險（ASan 單元測試 600 層即崩潰） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/lsp/ts_lsp.h` | — | `TSLSPContext` 新增 `walk_depth` | 供 ts_lsp.c 的守門使用 | 隨 ts_lsp.c 一起處理 |
 | `tests/test_ts_lsp.c` | — | 新增深度守門測試 | 對應 ts_lsp.c 修正 | 隨 ts_lsp.c 一起處理 |
-| `src/discover/gitignore.c` | `.gitignore` 比對區分大小寫 | Windows 上不分大小寫（與 `core.ignorecase=true` 的 git 一致） | `Build/` 在 Windows 的 git 會忽略 `build/`，索引卻會收進去（以真實 git 驗證） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `tests/test_gitignore.c` | — | 新增大小寫比對測試 | 對應 gitignore.c 修正 | 隨 gitignore.c 一起處理 |
+| `src/discover/gitignore_core.c` | `.gitignore` 比對區分大小寫 | Windows 上不分大小寫（與 `core.ignorecase=true` 的 git 一致） | `Build/` 在 Windows 的 git 會忽略 `build/`，索引卻會收進去（以真實 git 驗證） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_gitignore.c` | — | 新增大小寫比對測試 | 對應 gitignore_core.c 修正（上游 2026-10 把比對引擎從 gitignore.c 搬到此檔，修正隨之移植） | 隨 gitignore_core.c 一起處理 |

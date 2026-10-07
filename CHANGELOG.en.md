@@ -10,3 +10,5 @@ Fork maintenance changes only; for product changes see upstream releases.
 - Only the `main` branch and the `v0.11.0` tag/release are kept.
 - Triage record of open upstream issues/PRs.
 - Fixes for Windows-relevant defects with regression tests (cypher overflow and resource exhaustion, watcher on non-ASCII paths and unplugged drives, `cbm_setenv`, `cbm_readdir`, HTTP UI, like hints, installer verification, and more); see `REVIEW.md`.
+- Second review pass: store, route data flows, extractors, TOML multi-line arrays, file-size cap, allocation checks; see `REVIEW.md`.
+- Synced upstream to `e71f23e` (2026-10-07) with an incremental triage record of new PRs/issues.

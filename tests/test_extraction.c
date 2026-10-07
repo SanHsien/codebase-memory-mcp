@@ -1071,6 +1071,103 @@ TEST(c_struct) {
     PASS();
 }
 
+/* `typedef struct { … } Name;` is the dominant C spelling of a type: the
+ * aggregate itself is anonymous and the typedef's declarator names it. Without
+ * that name the struct had no Class node and none of its members a Field node
+ * (37 of the 38 structs in internal/cbm/cbm.h), so a member access could only
+ * bind some OTHER struct's same-named field. */
+TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef) {
+    CBMFileResult *r = extract("typedef struct {\n"
+                               "    int count;\n"
+                               "    const char *label;\n"
+                               "} Tally;\n"
+                               "\n"
+                               "typedef union {\n"
+                               "    int as_int;\n"
+                               "    float as_float;\n"
+                               "} Slot;\n"
+                               "\n"
+                               "typedef enum { SHADE_RED, SHADE_GREEN } Shade;\n"
+                               "\n"
+                               "typedef struct Named {\n"
+                               "    int id;\n"
+                               "} Named;\n"
+                               "\n"
+                               "typedef struct {\n"
+                               "    int raw;\n"
+                               "} *TallyRef;\n",
+                               CBM_LANG_C, "t", "tally.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the fix: none of the three anonymous aggregates has a def. */
+    ASSERT_TRUE(has_def(r, "Class", "Tally"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.count"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.label"));
+    ASSERT_TRUE(has_def(r, "Class", "Slot"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_int"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_float"));
+    ASSERT_TRUE(has_def_any(r, "Shade"));
+    /* A struct that names itself keeps exactly one def, under its own name. */
+    ASSERT_EQ(count_defs_named(r, "Class", "Named"), 1);
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Named.id"));
+    /* A pointer typedef names a pointer type, not the aggregate: no Class. */
+    ASSERT_FALSE(has_def(r, "Class", "TallyRef"));
+    ASSERT_FALSE(has_def(r, "Field", "raw"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A pointer-to-function member (`void (*open)(int);`, the shape of every
+ * kernel ops table) is a field of its struct. It shares the
+ * field_declaration + function_declarator shape with a C++ member FUNCTION
+ * declaration, which the field extractor rightly skips; the two differ in
+ * where the name sits: `(*open)` is a parenthesized pointer declarator. */
+TEST(extract_c_function_pointer_member_is_a_field) {
+    CBMFileResult *r = extract("struct Ops {\n"
+                               "    int flags;\n"
+                               "    void (*open)(int fd);\n"
+                               "    int (*cmp)(const void *, const void *);\n"
+                               "    char *(*name_of)(int id);\n"
+                               "    void (*handlers[4])(void);\n"
+                               "};\n",
+                               CBM_LANG_C, "t", "ops.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.flags"));
+    /* RED before the fix: none of the four pointer-to-function members. */
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.open"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.cmp"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.name_of"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.handlers"));
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 5);
+    /* Each carries a type text, which the cross-file registry needs to list
+     * it among its struct's fields. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Field") == 0) {
+            ASSERT_NOT_NULL(d->return_type);
+            ASSERT_TRUE(d->return_type[0] != '\0');
+        }
+    }
+    cbm_free_result(r);
+
+    /* A C++ member function DECLARATION stays out of the fields; a
+     * pointer-to-function member beside it is one. */
+    r = extract("class Widget {\n"
+                "public:\n"
+                "    void resize(int w);\n"
+                "    int (*hook)(int);\n"
+                "    int width;\n"
+                "};\n",
+                CBM_LANG_CPP, "t", "widget.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Field", "hook"));
+    ASSERT_TRUE(has_def(r, "Field", "width"));
+    ASSERT_FALSE(has_def(r, "Field", "resize"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* return_type of the first definition named `name`; NULL when there is no such
  * definition or it carries no return type. */
 static const char *def_return_type(CBMFileResult *r, const char *name) {
@@ -1080,6 +1177,103 @@ static const char *def_return_type(CBMFileResult *r, const char *name) {
         }
     }
     return NULL;
+}
+
+/* A member's name is the identifier at the bottom of its declarator, and its
+ * type is everything around that identifier, in the canonical spelling of the
+ * function return types below. Taking the first declarator's first child as
+ * the name published members called `*argv` and `seen[8]`, which no member
+ * access can ever match; taking only the `type` node typed `struct Node *next`
+ * as a struct, so `list->next[i]` had no element type; and of
+ * `struct Node *next, *prev;` only `next` existed. */
+TEST(extract_c_member_declarators_name_and_type) {
+    CBMFileResult *r = extract("struct Shapes {\n"
+                               "    char **argv;\n"
+                               "    int seen[8];\n"
+                               "    struct Node *next, *prev;\n"
+                               "    int a, b;\n"
+                               "    const char *label;\n"
+                               "    unsigned flags : 3;\n"
+                               "    char *const fixed;\n"
+                               "    char *names[4];\n"
+                               "    int plain;\n"
+                               "};\n",
+                               CBM_LANG_C, "t", "shapes.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the fix: `*argv`, `seen[8]`, `*next`, `*label`, `*names[4]`
+     * as names, and no `prev` / `b` at all. */
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 11);
+    ASSERT_STR_EQ(def_return_type(r, "argv"), "char **");
+    ASSERT_STR_EQ(def_return_type(r, "seen"), "int [8]");
+    ASSERT_STR_EQ(def_return_type(r, "next"), "struct Node *");
+    ASSERT_STR_EQ(def_return_type(r, "prev"), "struct Node *");
+    ASSERT_STR_EQ(def_return_type(r, "a"), "int");
+    ASSERT_STR_EQ(def_return_type(r, "b"), "int");
+    ASSERT_STR_EQ(def_return_type(r, "label"), "const char *");
+    ASSERT_STR_EQ(def_return_type(r, "flags"), "unsigned");
+    ASSERT_STR_EQ(def_return_type(r, "fixed"), "char *const");
+    ASSERT_STR_EQ(def_return_type(r, "names"), "char *[4]");
+    ASSERT_STR_EQ(def_return_type(r, "plain"), "int");
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Field") == 0) {
+            ASSERT_NULL(strpbrk(d->name, "*[]() "));
+        }
+    }
+    cbm_free_result(r);
+
+    /* Pointer-to-function members spell their type the way C does. */
+    r = extract("struct Ops {\n"
+                "    void (*open)(int fd);\n"
+                "    char *(*name_of)(int id);\n"
+                "    void (*handlers[4])(void);\n"
+                "    int (*cmp)(const void *,\n"
+                "               const void *);\n"
+                "};\n",
+                CBM_LANG_C, "t", "ops.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(def_return_type(r, "open"), "void (*)(int fd)");
+    ASSERT_STR_EQ(def_return_type(r, "name_of"), "char *(*)(int id)");
+    ASSERT_STR_EQ(def_return_type(r, "handlers"), "void (*[4])(void)");
+    ASSERT_STR_EQ(def_return_type(r, "cmp"), "int (*)(const void *, const void *)");
+    cbm_free_result(r);
+
+    /* C++: a reference member, and member functions stay out. */
+    r = extract("class Widget {\n"
+                "public:\n"
+                "    Widget *parent, *child;\n"
+                "    const Text &title;\n"
+                "    int *ids() const;\n"
+                "    void (resize)(int w);\n"
+                "};\n",
+                CBM_LANG_CPP, "t", "widget.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 3);
+    ASSERT_STR_EQ(def_return_type(r, "parent"), "Widget *");
+    ASSERT_STR_EQ(def_return_type(r, "child"), "Widget *");
+    ASSERT_STR_EQ(def_return_type(r, "title"), "const Text &");
+    cbm_free_result(r);
+
+    /* A member whose type is a macro invocation (jemalloc's
+     * `ql_head(tcache_slow_t) tcache_ql;`): the member is `tcache_ql`, never
+     * the macro's argument. Both grammars: a header is parsed as C++. */
+    static const CBMLanguage macro_langs[] = {CBM_LANG_C, CBM_LANG_CPP};
+    for (size_t li = 0; li < sizeof(macro_langs) / sizeof(macro_langs[0]); li++) {
+        r = extract("struct arena_s {\n"
+                    "    ql_head(tcache_slow_t) tcache_ql;\n"
+                    "    malloc_mutex_t mtx;\n"
+                    "};\n",
+                    macro_langs[li], "t", "arena.h");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(has_def(r, "Field", "tcache_slow_t"));
+        ASSERT_FALSE(has_def(r, "Field", "(tcache_slow_t)"));
+        ASSERT_TRUE(has_def(r, "Field", "tcache_ql"));
+        ASSERT_STR_EQ(def_return_type(r, "tcache_ql"), "ql_head(tcache_slow_t)");
+        ASSERT_TRUE(has_def(r, "Field", "mtx"));
+        cbm_free_result(r);
+    }
+    PASS();
 }
 
 /* PR #1245: the C grammar splits a declared return type across the `type` node,
@@ -1184,6 +1378,62 @@ TEST(cpp_method_return_type_preserves_pointer_and_qualifier) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* --- Python --- */
+/* #1277: annotated Python instance fields reach result->field_types (the
+ * cross-file LSP's only source for them); nothing unannotated is guessed and
+ * no graph def is minted for a field. */
+static const char *py_field_type_of(const CBMFileResult *r, const char *cls_suffix,
+                                    const char *field) {
+    for (int i = 0; i < r->field_types.count; i++) {
+        const CBMFieldType *ft = &r->field_types.items[i];
+        size_t cl = strlen(ft->class_qn);
+        size_t sl = strlen(cls_suffix);
+        if (cl >= sl && strcmp(ft->class_qn + cl - sl, cls_suffix) == 0 &&
+            strcmp(ft->field_name, field) == 0) {
+            return ft->type_text;
+        }
+    }
+    return NULL;
+}
+
+TEST(python_annotated_instance_fields_exported_issue1277) {
+    const char *src = "class Trainer(Base):\n"
+                      "    engine: Contract\n"
+                      "    limit: int = 3\n"
+                      "    plain = 5\n\n"
+                      "    def __init__(self, strategies: Contract, n, opt: 'Other' = None):\n"
+                      "        self.strategies = strategies\n"
+                      "        self.typed: Contract = strategies\n"
+                      "        self.count = n\n"
+                      "        self.made = make()\n"
+                      "        self.opt = opt\n"
+                      "        if n:\n"
+                      "            self.nested: Nested = n\n"
+                      "        def inner(other: Inner):\n"
+                      "            self.hidden = other\n\n"
+                      "    def later(self, x: Later):\n"
+                      "        self.late = x\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PYTHON, "t", "trainer.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "engine"), "Contract");
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "limit"), "int");
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "strategies"), "Contract");
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "typed"), "Contract");
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "opt"), "'Other'");
+    ASSERT_STR_EQ(py_field_type_of(r, ".Trainer", "nested"), "Nested");
+    /* Controls: no declared type, a nested function's binding, a non-__init__ method. */
+    ASSERT_NULL(py_field_type_of(r, ".Trainer", "plain"));
+    ASSERT_NULL(py_field_type_of(r, ".Trainer", "count"));
+    ASSERT_NULL(py_field_type_of(r, ".Trainer", "made"));
+    ASSERT_NULL(py_field_type_of(r, ".Trainer", "hidden"));
+    ASSERT_NULL(py_field_type_of(r, ".Trainer", "late"));
+    ASSERT_EQ(r->field_types.count, 6);
+    for (int i = 0; i < r->defs.count; i++) {
+        ASSERT_FALSE(r->defs.items[i].label && strcmp(r->defs.items[i].label, "Field") == 0);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(python_function) {
     CBMFileResult *r = extract(
         "def greet(name):\n    return f\"Hello {name}\"\n\ndef main():\n    greet(\"World\")\n",
@@ -3510,6 +3760,32 @@ TEST(go_cgo_pseudo_import_dropped) {
     PASS();
 }
 
+/* A Bash script imports the files it sources and nothing else. Every top-level
+ * command used to be read as an import of its command name (`set -e` imported
+ * "set", `source x.sh` imported "source"), which the import resolver bound to
+ * any project symbol of that name; the sourced paths themselves were lost. */
+TEST(bash_imports_are_sourced_files_only) {
+    CBMFileResult *r = extract("#!/usr/bin/env bash\nset -euo pipefail\nsource ./lib/util.sh\n"
+                               ". \"$DIR/other.sh\"\ncd build\nmake all\n"
+                               "if true; then\n  source nested.sh\nfi\n",
+                               CBM_LANG_BASH, "t", "run.sh");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(r->imports.count, 3);
+    ASSERT(has_import(r, "lib/util.sh"));
+    ASSERT(has_import(r, "other.sh"));
+    ASSERT(has_import(r, "nested.sh"));
+    static const char *const commands[] = {"set", "source", ".", "cd", "make"};
+    for (int i = 0; i < r->imports.count; i++) {
+        ASSERT_NOT_NULL(r->imports.items[i].module_path);
+        for (size_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c++) {
+            ASSERT_TRUE(strcmp(r->imports.items[i].module_path, commands[c]) != 0);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #1935: Go struct fields were never extracted — find_class_body() returns the
  * struct_type node, whose only named child is a field_declaration_list, so the
  * member loop matched nothing and every field was silently skipped (0 Field
@@ -3597,6 +3873,50 @@ TEST(c_imports) {
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
     ASSERT(has_import(r, "stdio.h"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Every header keeps its includes inside its include guard, and plenty of
+ * sources include behind `#ifdef`. Reading only the top level of the file
+ * left a guarded header with no imports at all. */
+TEST(c_imports_inside_preprocessor_blocks) {
+    static const CBMLanguage langs[] = {CBM_LANG_C, CBM_LANG_CPP};
+    for (size_t li = 0; li < sizeof(langs) / sizeof(langs[0]); li++) {
+        CBMFileResult *r = extract("#ifndef GUARD_H\n"
+                                   "#define GUARD_H\n"
+                                   "#include \"first.h\"\n"
+                                   "#include <second.h>\n"
+                                   "#if defined(USE_X)\n"
+                                   "#include \"x_only.h\"\n"
+                                   "#elif defined(USE_Z)\n"
+                                   "#include \"z_only.h\"\n"
+                                   "#else\n"
+                                   "#include \"y_only.h\"\n"
+                                   "#endif\n"
+                                   "int guarded(void);\n"
+                                   "#endif\n",
+                                   langs[li], "t", "guard.h");
+        ASSERT_NOT_NULL(r);
+        ASSERT(has_import(r, "first.h"));
+        ASSERT(has_import(r, "second.h"));
+        ASSERT(has_import(r, "x_only.h"));
+        ASSERT(has_import(r, "z_only.h"));
+        ASSERT(has_import(r, "y_only.h"));
+        ASSERT_EQ(r->imports.count, 5);
+        cbm_free_result(r);
+    }
+    /* Top-level includes come out once, as before. */
+    CBMFileResult *r = extract("#include \"top.h\"\n"
+                               "#ifdef WITH_EXTRA\n"
+                               "#include \"extra.h\"\n"
+                               "#endif\n"
+                               "int f(void) { return 0; }\n",
+                               CBM_LANG_C, "t", "top.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(r->imports.count, 2);
+    ASSERT(has_import(r, "top.h"));
+    ASSERT(has_import(r, "extra.h"));
     cbm_free_result(r);
     PASS();
 }
@@ -7067,12 +7387,12 @@ TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
     PASS();
 }
 
-/* #1017: docstring truncation at MAX_COMMENT_LEN (500 bytes) can split a
+/* #1017: docstring truncation at MAX_COMMENT_LEN (500 bytes) could split a
  * multi-byte UTF-8 character, leaving an incomplete byte sequence.
  * Craft a Go comment whose 498th-500th bytes are a 3-byte CJK character
- * (U+6210 = 成 = e6 88 90).  The raw byte truncation at offset 500 lands
- * one byte past the character start, splitting it.  After the fix the
- * truncated string must end on a complete codepoint boundary. */
+ * (U+6210 = 成 = e6 88 90), where a raw byte cut at offset 500 lands one
+ * byte past the character start. Docstrings are no longer cut at all, so
+ * the whole comment is kept and still ends on a complete codepoint. */
 TEST(docstring_utf8_truncation_boundary_issue1017) {
     /* Build a comment: "// " (3 bytes) + 495 ASCII 'A' + "成成成" (9 bytes)
      * Total comment text = 3 + 495 + 9 = 507 bytes.
@@ -7113,10 +7433,10 @@ TEST(docstring_utf8_truncation_boundary_issue1017) {
     }
     ASSERT_NOT_NULL(doc);
 
-    /* Verify every byte in the truncated docstring is valid UTF-8:
-     * no trailing incomplete multi-byte sequence. */
+    /* The whole comment, and every byte of it valid UTF-8: no trailing
+     * incomplete multi-byte sequence. */
+    ASSERT_STR_EQ(doc, comment);
     size_t len = strlen(doc);
-    ASSERT_TRUE(len <= 500);
     const unsigned char *u = (const unsigned char *)doc;
     size_t i = 0;
     while (i < len) {
@@ -7138,6 +7458,298 @@ TEST(docstring_utf8_truncation_boundary_issue1017) {
         i += (size_t)seq_len;
     }
 
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Doc comments: the whole comment run above a definition, above its
+ * attributes / export / declaration wrapper, never a detached or
+ * banner-only run, and never cut at 500 bytes.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* The def with this label and name, or NULL. */
+static const CBMDefinition *doc_def(CBMFileResult *r, const char *label, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && d->name && strcmp(d->label, label) == 0 && strcmp(d->name, name) == 0) {
+            return d;
+        }
+    }
+    return NULL;
+}
+
+TEST(doc_go_comment_group_without_directives) {
+    CBMFileResult *r = extract("package knob\n\n"
+                               "// Turn rotates the knob by one step.\n"
+                               "// It is safe for concurrent use.\n"
+                               "//go:noinline\n"
+                               "func Turn() {}\n",
+                               CBM_LANG_GO, "t", "knob.go");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Function", "Turn");
+    ASSERT_NOT_NULL(d);
+    /* go/ast CommentGroup.Text: the whole group, the //go: directive dropped. */
+    ASSERT_STR_EQ(d->docstring, "// Turn rotates the knob by one step.\n"
+                                "// It is safe for concurrent use.");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_go_struct_field) {
+    CBMFileResult *r = extract("package knob\n\n"
+                               "// Knob is a rotary control.\n"
+                               "type Knob struct {\n"
+                               "\t// Steps counts the turns so far.\n"
+                               "\tSteps int\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "knob.go");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *knob = doc_def(r, "Struct", "Knob");
+    ASSERT_NOT_NULL(knob);
+    ASSERT_STR_EQ(knob->docstring, "// Knob is a rotary control.");
+    const CBMDefinition *steps = doc_def(r, "Field", "Steps");
+    ASSERT_NOT_NULL(steps);
+    ASSERT_STR_EQ(steps->docstring, "// Steps counts the turns so far.");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_go_detached_comment_is_not_doc) {
+    /* go/doc: a comment group separated by a blank line documents nothing. */
+    CBMFileResult *r = extract("package knob\n\n"
+                               "// Section: helpers.\n"
+                               "\n"
+                               "func Reset() {}\n",
+                               CBM_LANG_GO, "t", "knob.go");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Function", "Reset");
+    ASSERT_NOT_NULL(d);
+    ASSERT_NULL(d->docstring);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_python_comment_run_and_detached) {
+    CBMFileResult *r = extract("# Turns the knob.\n"
+                               "# One step per call.\n"
+                               "def turn():\n"
+                               "    pass\n"
+                               "\n"
+                               "# Section: helpers.\n"
+                               "\n"
+                               "def reset():\n"
+                               "    pass\n",
+                               CBM_LANG_PYTHON, "t", "knob.py");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *turn = doc_def(r, "Function", "turn");
+    ASSERT_NOT_NULL(turn);
+    ASSERT_STR_EQ(turn->docstring, "# Turns the knob.\n# One step per call.");
+    const CBMDefinition *reset = doc_def(r, "Function", "reset");
+    ASSERT_NOT_NULL(reset);
+    ASSERT_NULL(reset->docstring);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_rust_attribute_impl_method_and_inner_doc) {
+    CBMFileResult *r = extract("//! The knob crate.\n"
+                               "\n"
+                               "/// Adds two steps.\n"
+                               "/// Wraps on overflow.\n"
+                               "#[inline]\n"
+                               "pub fn add(a: u8, b: u8) -> u8 { a.wrapping_add(b) }\n"
+                               "\n"
+                               "pub struct Knob;\n"
+                               "\n"
+                               "impl Knob {\n"
+                               "    /// Turns the knob once.\n"
+                               "    pub fn turn(&self) {}\n"
+                               "}\n",
+                               CBM_LANG_RUST, "t", "lib.rs");
+    ASSERT_NOT_NULL(r);
+    /* The doc sits above the attribute; a run is joined line by line. */
+    const CBMDefinition *add = doc_def(r, "Function", "add");
+    ASSERT_NOT_NULL(add);
+    ASSERT_STR_EQ(add->docstring, "/// Adds two steps.\n/// Wraps on overflow.");
+    /* impl methods get their doc too; a single comment keeps its bytes. */
+    const CBMDefinition *turn = doc_def(r, "Method", "turn");
+    ASSERT_NOT_NULL(turn);
+    ASSERT_STR_EQ(turn->docstring, "/// Turns the knob once.\n");
+    /* The //! inner doc documents the crate (the File node), not the struct. */
+    const CBMDefinition *knob = doc_def(r, "Struct", "Knob");
+    ASSERT_NOT_NULL(knob);
+    ASSERT_NULL(knob->docstring);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_ts_export_and_arrow_wrapper) {
+    CBMFileResult *r = extract("/** Exported helper. */\n"
+                               "export function helper(): number {\n"
+                               "    return 1;\n"
+                               "}\n"
+                               "\n"
+                               "/** Arrow helper. */\n"
+                               "export const arrow = (): number => 2;\n",
+                               CBM_LANG_TYPESCRIPT, "t", "knob.ts");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *helper = doc_def(r, "Function", "helper");
+    ASSERT_NOT_NULL(helper);
+    ASSERT_STR_EQ(helper->docstring, "/** Exported helper. */");
+    const CBMDefinition *arrow = doc_def(r, "Function", "arrow");
+    ASSERT_NOT_NULL(arrow);
+    ASSERT_STR_EQ(arrow->docstring, "/** Arrow helper. */");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_csharp_xml_doc_run_and_top_level_function) {
+    CBMFileResult *r = extract("/// Adds one.\n"
+                               "static int AddOne(int x) => x + 1;\n"
+                               "\n"
+                               "namespace Knobs {\n"
+                               "    public class Knob {\n"
+                               "        /// <summary>\n"
+                               "        /// Turns the knob.\n"
+                               "        /// </summary>\n"
+                               "        public void Turn() {}\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_CSHARP, "t", "Knob.cs");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *turn = doc_def(r, "Method", "Turn");
+    ASSERT_NOT_NULL(turn);
+    ASSERT_STR_EQ(turn->docstring, "/// <summary>\n/// Turns the knob.\n/// </summary>");
+    const CBMDefinition *add = doc_def(r, "Function", "AddOne");
+    ASSERT_NOT_NULL(add);
+    ASSERT_STR_EQ(add->docstring, "/// Adds one.");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_java_javadoc_over_line_comment_and_field) {
+    CBMFileResult *r = extract("class Knob {\n"
+                               "    /** Turns taken so far. */\n"
+                               "    private int steps;\n"
+                               "\n"
+                               "    /** Turns the knob. */\n"
+                               "    // NOSONAR\n"
+                               "    void turn() {}\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "Knob.java");
+    ASSERT_NOT_NULL(r);
+    /* A plain comment between the Javadoc and the method does not replace it. */
+    const CBMDefinition *turn = doc_def(r, "Method", "turn");
+    ASSERT_NOT_NULL(turn);
+    ASSERT_STR_EQ(turn->docstring, "/** Turns the knob. */");
+    const CBMDefinition *steps = doc_def(r, "Field", "steps");
+    ASSERT_NOT_NULL(steps);
+    ASSERT_STR_EQ(steps->docstring, "/** Turns taken so far. */");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_kotlin_kdoc_folded_after_imports) {
+    /* tree-sitter-kotlin folds this KDoc into the node before the class, so it
+     * is no sibling of it. */
+    CBMFileResult *r = extract("package knobs\n"
+                               "\n"
+                               "import knobs.core.Step\n"
+                               "import knobs.core.Turn\n"
+                               "\n"
+                               "/** Base class of every knob. */\n"
+                               "abstract class BaseKnob(step: Step) : Turn(step)\n",
+                               CBM_LANG_KOTLIN, "t", "BaseKnob.kt");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Class", "BaseKnob");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d->docstring, "/** Base class of every knob. */");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_c_typedef_struct) {
+    CBMFileResult *r = extract("/* A file event. */\n"
+                               "typedef struct aeFileEvent {\n"
+                               "    int mask;\n"
+                               "} aeFileEvent;\n",
+                               CBM_LANG_C, "t", "ae.h");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Class", "aeFileEvent");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d->docstring, "/* A file event. */");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_perl_pod_section_by_sub_name) {
+    CBMFileResult *r = extract("package Knob;\n"
+                               "\n"
+                               "sub turn { return 1; }\n"
+                               "\n"
+                               "1;\n"
+                               "__END__\n"
+                               "\n"
+                               "=head1 METHODS\n"
+                               "\n"
+                               "=head2 turn\n"
+                               "\n"
+                               "Turns the knob once.\n"
+                               "\n"
+                               "=cut\n",
+                               CBM_LANG_PERL, "t", "Knob.pm");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Function", "turn");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d->docstring, "=head2 turn\n\nTurns the knob once.");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_long_comment_kept_whole) {
+    /* One 12-line block comment well past the old 500-byte cut, kept byte for
+     * byte. */
+    char src[4096];
+    char want[2048];
+    int w = snprintf(want, sizeof(want), "/*");
+    for (int i = 0; i < 12; i++) {
+        w += snprintf(want + w, sizeof(want) - (size_t)w,
+                      "\n * Line %02d of a long doc that keeps going past the cut.", i);
+    }
+    snprintf(want + w, sizeof(want) - (size_t)w, "\n */");
+    snprintf(src, sizeof(src), "package knob\n\n%s\nfunc Long() {}\n", want);
+    ASSERT_GT((int)strlen(want), 500);
+
+    CBMFileResult *r = extract(src, CBM_LANG_GO, "t", "knob.go");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = doc_def(r, "Function", "Long");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d->docstring, want);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(doc_divider_only_run_is_not_doc) {
+    CBMFileResult *r = extract("/*****************************/\n"
+                               "void knob(void) {}\n"
+                               "\n"
+                               "// \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n"
+                               "void dial(void) {}\n"
+                               "\n"
+                               "/* Resets the dial. */\n"
+                               "void reset(void) {}\n",
+                               CBM_LANG_C, "t", "knob.c");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *knob = doc_def(r, "Function", "knob");
+    ASSERT_NOT_NULL(knob);
+    ASSERT_NULL(knob->docstring);
+    const CBMDefinition *dial = doc_def(r, "Function", "dial"); /* a box-drawing banner */
+    ASSERT_NOT_NULL(dial);
+    ASSERT_NULL(dial->docstring);
+    const CBMDefinition *reset = doc_def(r, "Function", "reset");
+    ASSERT_NOT_NULL(reset);
+    ASSERT_STR_EQ(reset->docstring, "/* Resets the dial. */");
     cbm_free_result(r);
     PASS();
 }
@@ -9075,12 +9687,16 @@ SUITE(extraction) {
     RUN_TEST(c_function_return_type_preserves_pointer_and_qualifier);
     RUN_TEST(c_function_return_type_plain_unchanged);
     RUN_TEST(c_struct);
+    RUN_TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef);
+    RUN_TEST(extract_c_function_pointer_member_is_a_field);
+    RUN_TEST(extract_c_member_declarators_name_and_type);
     RUN_TEST(cpp_class);
     RUN_TEST(cpp_method_return_type_preserves_pointer_and_qualifier);
 
     /* Scripting */
     RUN_TEST(python_function);
     RUN_TEST(python_class);
+    RUN_TEST(python_annotated_instance_fields_exported_issue1277);
     RUN_TEST(js_function);
     RUN_TEST(js_class);
     RUN_TEST(ts_function);
@@ -9248,10 +9864,12 @@ SUITE(extraction) {
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
     RUN_TEST(go_cgo_pseudo_import_dropped);
+    RUN_TEST(bash_imports_are_sourced_files_only);
     RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
     RUN_TEST(c_imports);
+    RUN_TEST(c_imports_inside_preprocessor_blocks);
     RUN_TEST(ruby_imports);
     RUN_TEST(lua_imports);
     RUN_TEST(import_stress_go);
@@ -9381,6 +9999,19 @@ SUITE(extraction) {
     RUN_TEST(extract_c_test_dir_marks_is_test_issue1294);
     RUN_TEST(extract_python_method_test_dir_marks_is_test_issue1294);
     RUN_TEST(docstring_utf8_truncation_boundary_issue1017);
+    RUN_TEST(doc_go_comment_group_without_directives);
+    RUN_TEST(doc_go_struct_field);
+    RUN_TEST(doc_go_detached_comment_is_not_doc);
+    RUN_TEST(doc_python_comment_run_and_detached);
+    RUN_TEST(doc_rust_attribute_impl_method_and_inner_doc);
+    RUN_TEST(doc_ts_export_and_arrow_wrapper);
+    RUN_TEST(doc_csharp_xml_doc_run_and_top_level_function);
+    RUN_TEST(doc_java_javadoc_over_line_comment_and_field);
+    RUN_TEST(doc_kotlin_kdoc_folded_after_imports);
+    RUN_TEST(doc_c_typedef_struct);
+    RUN_TEST(doc_perl_pod_section_by_sub_name);
+    RUN_TEST(doc_long_comment_kept_whole);
+    RUN_TEST(doc_divider_only_run_is_not_doc);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
 
     /* #518/#519 — prose carried into docstring so nodes_fts can index it */

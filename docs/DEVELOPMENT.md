@@ -29,7 +29,7 @@ gate 只驗維護層。C 程式碼用下方的 MSYS2 步驟本機驗證，也由
 ## 本機建置與測試 C（Windows）
 
 需要 MSYS2 CLANG64（`pacman -S --needed mingw-w64-clang-x86_64-{clang,clang-tools-extra,zlib,cppcheck,python} make unzip zip`）。
-從 MSYS2 CLANG64 的開始功能表捷徑開啟 shell；從別的 shell 直接叫 `bash.exe` 會丟失 `LOCALAPPDATA`、`USERPROFILE` 等變數，daemon 測試會失敗。
+從 MSYS2 CLANG64 的開始功能表捷徑開啟 shell。從別的 shell 直接叫 `bash.exe -l` 會丟失 `USERPROFILE`、`LOCALAPPDATA`、`APPDATA`、`ProgramData`、`PATHEXT`、`ComSpec` 等變數：daemon 測試會失敗，`test.sh` 裡啟動子 PowerShell 的契約（如 Windows 預檢）也會失敗。
 
 ```bash
 scripts/build.sh CC=clang CXX=clang++          # 產品二進位
