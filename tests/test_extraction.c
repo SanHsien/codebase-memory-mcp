@@ -6,6 +6,7 @@
  * verifying definitions, calls, and imports are correctly extracted.
  */
 #include "test_framework.h"
+#include <yyjson/yyjson.h>
 #include "cbm.h"
 #include "foundation/constants.h"     /* CBM_SZ_* */
 #include "preprocessor.h"             /* cbm_export_macro_candidates (#1989) */
@@ -8899,7 +8900,59 @@ TEST(extract_c_skips_exponential_macro_expansion) {
     PASS();
 }
 
+/* The embedded-block search walked with a fixed 1024-slot stack and silently stopped
+ * pushing when it filled, dropping the earliest siblings: a <script> followed by enough
+ * markup was never seen, so the component lost all its definitions. */
+TEST(svelte_script_found_before_many_markup_nodes) {
+    const char *head = "<script>\n  export function realFn() { return 1; }\n</script>\n";
+    const char *item = "<p>x</p>\n";
+    enum { ITEMS = 1500 };
+    size_t sz = strlen(head) + (size_t)ITEMS * strlen(item) + 1;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src + snprintf(src, sz, "%s", head);
+    for (int i = 0; i < ITEMS; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "%s", item);
+    }
+    CBMFileResult *r = extract(src, CBM_LANG_SVELTE, "t", "Big.svelte");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(find_def_by_name(r, "realFn") != NULL);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A trigger body near the 512-byte properties buffer was cut mid-string, leaving the
+ * docstring as unterminated JSON. */
+TEST(objectscript_udl_long_trigger_body_is_valid_json) {
+    char src[4096];
+    char *p = src + snprintf(src, sizeof(src),
+                             "Class MyApp.Big Extends %%Persistent\n{\n"
+                             "Trigger OnBig [ Event = DELETE, Time = AFTER ] {\n");
+    for (int i = 0; i < 60; i++) {
+        p += snprintf(p, sizeof(src) - (size_t)(p - src), "    Set x%d = %d\n", i, i);
+    }
+    snprintf(p, sizeof(src) - (size_t)(p - src), "}\n}\n");
+    CBMFileResult *r = extract(src, CBM_LANG_OBJECTSCRIPT_UDL, "t", "Big.cls");
+    ASSERT_NOT_NULL(r);
+    const char *doc = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Trigger") == 0) {
+            doc = r->defs.items[i].docstring;
+        }
+    }
+    ASSERT_NOT_NULL(doc);
+    yyjson_doc *jd = yyjson_read(doc, strlen(doc), 0);
+    bool valid = jd != NULL;
+    yyjson_doc_free(jd);
+    cbm_free_result(r);
+    ASSERT_TRUE(valid);
+    PASS();
+}
+
 SUITE(extraction) {
+    RUN_TEST(svelte_script_found_before_many_markup_nodes);
+    RUN_TEST(objectscript_udl_long_trigger_body_is_valid_json);
     RUN_TEST(extract_c_skips_exponential_macro_expansion);
     RUN_TEST(extract_compact_keeps_every_field_and_shrinks_the_arena);
     RUN_TEST(extract_compact_is_idempotent_and_survives_empty_results);

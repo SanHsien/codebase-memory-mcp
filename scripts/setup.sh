@@ -144,6 +144,27 @@ fetch() {
     fi
 }
 
+# Succeeds only when checksums.txt has exactly one SHA-256 for the asset and it matches
+# the archive. A missing, conflicting or unreadable entry fails closed.
+verify_release_checksum() {
+    local archive="$1" sums="$2" asset="$3" expected actual
+    expected=$(awk -v asset="$asset" '
+        NF == 2 && length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ {
+            name = $2; sub(/^\*/, "", name)
+            if (name == asset) { h = tolower($1); if (seen && h != e) bad = 1; e = h; seen = 1 }
+        }
+        END { if (seen && !bad) print e }' "$sums") || return 1
+    [ -n "$expected" ] || return 1
+    if command -v sha256sum &>/dev/null; then
+        actual=$(sha256sum "$archive" | awk '{print tolower($1)}')
+    elif command -v shasum &>/dev/null; then
+        actual=$(shasum -a 256 "$archive" | awk '{print tolower($1)}')
+    else
+        return 1
+    fi
+    [ "$actual" = "$expected" ]
+}
+
 download_binary() {
     local platform="$1" tool="$2"
 
@@ -166,6 +187,11 @@ download_binary() {
     local tmpdir="$CLEANUP_DIR"
 
     fetch "$url" "$tool" > "${tmpdir}/${asset}"
+    fetch "https://github.com/${REPO}/releases/download/${tag}/checksums.txt" "$tool" > "${tmpdir}/checksums.txt"
+    if ! verify_release_checksum "${tmpdir}/${asset}" "${tmpdir}/checksums.txt" "$asset"; then
+        die "SHA-256 of ${asset} does not match checksums.txt for ${tag}. Nothing was installed."
+    fi
+    ok "SHA-256 verified"
     tar -xzf "${tmpdir}/${asset}" -C "$tmpdir"
 
     mkdir -p "$INSTALL_DIR"

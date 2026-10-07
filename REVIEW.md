@@ -1,11 +1,11 @@
 # REVIEW
 
-最新覆核：2026-10-02。範圍：產品 C 程式碼（`src/`、`internal/cbm/` 非 vendored）、安裝腳本、workflow、測試腳本。
+最新覆核：2026-10-07。範圍：產品 C 程式碼（`src/`、`internal/cbm/` 非 vendored）、安裝腳本、workflow、測試腳本。
 
 ## 方法與環境
 
 - Windows 11 + MSYS2 CLANG64（clang 22.1），ASan＋UBSan 測試 runner。
-- 9 個區塊各自獨立讀碼審查（foundation／store、mcp／cypher、pipeline／discover／watcher、cli／daemon／ui、internal/cbm 抽取器、腳本與 workflow、config 編輯器、store 其餘與 supervisor、extract／LSP 本體）。
+- 12 個區塊各自獨立讀碼審查（foundation／store、mcp／cypher、pipeline／discover／watcher、cli／daemon／ui、internal/cbm 抽取器、腳本與 workflow、config 編輯器、store 其餘與 supervisor、extract／LSP 本體；第二輪補 `store.c` 全檔、`extract_*.c`、`pass_route_nodes.c` 後段）。
 - 每個發現我都對照原始碼驗證，並盡量用真實二進位或真實 git 實測。能重現的先寫會失敗的測試、確認失敗，再修，修後重跑；實測不成立的剔除。
 
 ## 測試結果
@@ -13,7 +13,7 @@
 | | 通過 | 失敗 | 略過 |
 |---|---:|---:|---:|
 | 修正前（僅補齊環境） | 7726 | 78 | 68 |
-| 現在（含同步上游 90 個提交後） | 8179 | 0 | 79 |
+| 現在（含同步上游 90 個提交後） | 8197 | 0 | 79 |
 
 另外：`scripts/test.sh` 的全部契約步驟通過；產品二進位回歸（watchdog、worker、scope、字串白名單等）通過。
 
@@ -27,6 +27,16 @@
 | 磁碟機拔除或網路磁碟斷線超過寬限期後，索引資料庫被刪除 | `src/watcher/watcher.c` |
 | ADR 空區段取代時，新內容黏到下一個標題上（標題被改名） | `src/store/store.c` |
 | 磁碟滿的短寫可能被當成功發佈；頁面偏移在 Windows 超過 2 GiB 寫錯位置（無自動測試） | `internal/cbm/sqlite_writer.c` |
+| ADR 段落累加在 8 KiB 緩衝區滿後仍每行寫入換行，越界寫入堆疊（ASan 實測） | `src/store/store.c` |
+| 度數批次查詢超過約 2045 個 id 時型別參數綁錯位置，所有節點度數變 0 | `src/store/store.c` |
+| 平行路徑（50 檔以上）每條 DATA_FLOWS 的 `route`、`caller_args` 全部遺失（切片少 1 位元組，JSON 驗證失敗後退回最小屬性） | `src/pipeline/pass_route_nodes.c` |
+| SvelteKit：layout 與 page 的 `load` 共用一個 Route；monorepo 路由變成 `/app/src/routes/x`；handler 名稱未跳脫 | `src/pipeline/pass_route_nodes.c` |
+| `<script>` 後接大量標記時，Svelte／Vue 元件的定義全部遺失（固定 1024 格堆疊丟棄最前面的節點） | `internal/cbm/extract_imports.c` |
+| ObjectScript 長 Trigger 本體與 SqlMap globals 產生不合法 JSON | `internal/cbm/extract_defs.c` |
+| 覆蓋率影子圖：失敗清空後又出現時，`missed` 圖仍是空的（指紋未更新） | `src/store/store.c` |
+| 批次寫入在呼叫端交易中會提交呼叫端的交易；COMMIT 失敗仍回成功 | `src/store/store.c` |
+| sqlite_writer 根頁為 0（配置失敗）時仍發佈指向第 0 頁的資料庫（無自動測試） | `internal/cbm/sqlite_writer.c` |
+| TOML 跨行陣列裡的 `  [1]` 被當成表頭：移除留下殘缺 TOML、合法檔案被拒 | `src/cli/config_toml_edit.c` |
 
 **當機、卡死、資源耗盡**
 
@@ -37,6 +47,9 @@
 | TS／JS 深度巢狀檔案：ASan 單元測試 600 層即崩潰；真實二進位 8000 層 25 秒 → 5 秒，30000 層超過 5 分鐘 → 105 秒 | `internal/cbm/lsp/ts_lsp.c` |
 | 畸形 `Cargo.toml` 的 `members` 使索引無限迴圈 | `internal/cbm/lsp/rust_cargo.c` |
 | C 前處理器巨集展開炸彈：1 KB 檔案 2^18 個 token 要 9.6 秒、2^22 個超過 120 秒；展開前估算大小，超過 200 萬 token 就略過展開（防護放在非 vendored 的 `preprocessor.cpp`） | `internal/cbm/preprocessor.cpp` |
+| dbt 深巢狀 Jinja 讓 SQL 抽取 stack overflow（ASan 實測）；改為迭代 | `internal/cbm/extract_dbt.c` |
+| 內嵌 script 區塊不套用走訪節點上限（無自動測試） | `internal/cbm/extract_imports.c` |
+| 11 處配置後未檢查就使用（記憶體不足時 NULL 解參考，無自動測試） | `ac.c`、`sqlite_writer.c`、`cypher.c`、`mcp.c`、`pass_githistory.c`、`pipeline.c`、`registry.c`、`store.c` |
 | OPTIONAL MATCH 起點無節點時 heap overflow（上游同期也修了，已採用上游版本） | `src/cypher/cypher.c` |
 
 **Windows 行為錯誤**
@@ -58,7 +71,11 @@
 | 合法 regex（`handle\w+`、`colou?r`）的搜尋漏結果（hint 計算錯誤） | `src/store/store.c` |
 | `/api/index` 路徑被截斷可繞過工作區邊界；回應與日誌 JSON 未跳脫 | `src/ui/http_server.c` |
 | `setup-windows.ps1` 下載後不驗證雜湊（實測：真檔通過，竄改／缺項／空檔皆拒絕） | `scripts/setup-windows.ps1` |
-| 範圍計數把 scope 的 `_`、`%` 當 LIKE 萬用字元（`src/my_pkg` 也計入 `src/myXpkg`） | `src/store/store.c` |
+| 範圍計數把 scope 的 `_`、`%` 當 LIKE 萬用字元（`src/my_pkg` 也計入 `src/myXpkg`）；範圍計數讀取失敗回 0 | `src/store/store.c` |
+| QN 後綴查詢 `my_func` 也命中 `a.myXfunc`、`a.MY_FUNC`（`get_code_snippet` 可能回錯節點） | `src/store/store.c` |
+| 一筆壞 JSON 的 properties 讓整個架構查詢失敗 | `src/store/store.c` |
+| `setup.sh` 下載後不驗證雜湊（`tools/tests/test_setup_sh_checksum.py`） | `scripts/setup.sh` |
+| `CBM_MAX_FILE_BYTES` 超過 2 GiB（Windows 的 `long`）時反而退回 512 MiB | `src/foundation/limits.c` |
 | `--port=80abc` 被當成 80；`SO_EXCLUSIVEADDRUSE` 失敗仍 bind（無測試） | `src/main.c`、`src/ui/httpd.c` |
 | graph_buffer 讀取不檢查結束碼、負 id（防禦性，測試在修正前也通過） | `src/graph_buffer/graph_buffer.c` |
 | Perl 早退漏記 `mark_done` | `internal/cbm/cbm.c` |
@@ -74,11 +91,18 @@
 - YAML column-0 清單被插壞：修正前測試即通過，既有程式已處理。
 - OneDrive 雲端佔位檔被當成符號連結：本機 OneDrive 無此類檔案，無法重現。
 - workflow 的 `${{ inputs.* }}`：只有寫入權限者能手動觸發，輸入非外部可控，且上游契約逐檔檢查標記，不改。
+- R 匯入收集的遞迴會 stack overflow：3 萬層巢狀呼叫實測不崩潰。
+- JS 深括號 callee 的尾遞迴會 stack overflow：3 萬層實測不崩潰。
+
+## 評估後不改
+
+- `file_pattern`（glob 轉 LIKE）與 `url_path` 搜尋未跳脫 `_`：只會多列出結果，改動需改寫上游測試的預期，不值得。
+- DATA_FLOWS 每條路由最多 64 個呼叫端、32 個 infra handler：有意的扇出上限。
+- 架構查詢 Louvain 分群 O(E·n)、`bfs_multi` 種子寫入未檢查、gRPC 路由 QN 超長截斷：效能或極端輸入，未見實際影響。
+- 架構的路由屬性用字串搜尋解析（非字串值時取錯欄位）：路由屬性由本程式產生，皆為字串。
 
 ## 未結
 
-- **`daemon_ipc` 4 個測試**在本機以預設 `LOCALAPPDATA` 失敗：`AppData\Local` 的 ACL 含 AppContainer 與 `CodexSandboxUsers`，daemon 的祖先目錄安全檢查因此拒絕。把 `LOCALAPPDATA` 換到乾淨位置後 37 個全過，確認是環境而非程式；未動安全邏輯。
-- 一個計時型測試（`daemon_ipc_windows_startup_retries_transient_rendezvous_reader`）在 24 個並行 job 下偶發失敗，單獨跑通過。
-- 審查提出但未處理：`setup.sh`（非 Windows）無雜湊驗證；OOM 時未檢查 malloc 的多處；`cbm_max_file_bytes` 在 Windows 上限 2 GiB；sqlite_writer 的 B-tree 根頁回傳 0 未檢查；`cbm_count_*_scoped` 讀取失敗回 0；TOML 多行陣列內以 `[` 開頭的行被當成表頭。
-- 沒有逐行讀完：`store.c` 部分區段、多數 `extract_*.c` 細節、`pass_route_nodes.c` 後段。這些不能視為已排除。
-- 上游持續前進：本次同步到 `7d4a12c`（2026-10-02）；之後又有 7 個提交、27 個 PR、6 個 issue 待審查（`upstream-check` 會持續提示）。
+- **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+- 抽取器沒有逐行讀完：`extract_defs.c`、`extract_calls.c`、`extract_usages.c`、`extract_unified.c` 大部分只做模式搜尋；各語言 LSP 檔案未審。這些不能視為已排除。
+- 上游持續前進：本次同步到 `7d4a12c`（2026-10-02），之後的提交、PR、issue 由 `upstream-check` 持續提示。

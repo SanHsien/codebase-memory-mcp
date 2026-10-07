@@ -1323,6 +1323,9 @@ static bool pb_promote_and_flush(PageBuilder *pb, uint8_t **cells, int *cell_len
     }
     pb->leaves[pb->leaf_count].max_key = 0;
     pb->leaves[pb->leaf_count].sep_cell = (uint8_t *)malloc(cell_lens[prev_idx]);
+    if (!pb->leaves[pb->leaf_count].sep_cell) {
+        return false;
+    }
     memcpy(pb->leaves[pb->leaf_count].sep_cell, cells[prev_idx], cell_lens[prev_idx]);
     pb->leaves[pb->leaf_count].sep_cell_len = cell_lens[prev_idx];
 
@@ -1396,6 +1399,10 @@ static uint32_t write_index_btree(FILE *fp, uint32_t *next_page, uint8_t **cells
         pb.leaves[pb.leaf_count].max_key = 0;
         int last = count - SKIP_ONE;
         pb.leaves[pb.leaf_count].sep_cell = (uint8_t *)malloc(cell_lens[last]);
+        if (!pb.leaves[pb.leaf_count].sep_cell) {
+            pb_free(&pb);
+            return 0;
+        }
         memcpy(pb.leaves[pb.leaf_count].sep_cell, cells[last], cell_lens[last]);
         pb.leaves[pb.leaf_count].sep_cell_len = cell_lens[last];
         pb_flush_leaf(&pb);
@@ -1903,7 +1910,9 @@ static int write_one_table(write_db_ctx_t *w, uint32_t *root, const void *items,
         }
     }
     *root = pb_finalize_table(&pb, &w->next_page, get_id(items, count - SKIP_ONE));
-    return 0;
+    /* Root 0 is the allocation-failure result; a master entry pointing at page 0 is a
+     * corrupt database, so fail instead of publishing it. */
+    return *root != 0 ? 0 : ERR_WRITE_FAILED;
 }
 
 /* Adapter functions for write_one_table (nodes are written via the streaming
@@ -1928,9 +1937,9 @@ static int64_t adapt_token_vec_id(const void *items, int i) {
 }
 
 /* Phase 2: Write metadata tables (projects, file_hashes, summaries, sqlite_sequence). */
-static void write_metadata_tables(write_db_ctx_t *w, uint32_t *projects_root,
-                                  uint32_t *file_hashes_root, uint32_t *summaries_root,
-                                  uint32_t *sqlite_seq_root) {
+static int write_metadata_tables(write_db_ctx_t *w, uint32_t *projects_root,
+                                 uint32_t *file_hashes_root, uint32_t *summaries_root,
+                                 uint32_t *sqlite_seq_root) {
     int proj_rec_len;
     uint8_t *proj_rec =
         build_project_record(w->project, w->indexed_at, w->root_path, &proj_rec_len);
@@ -1967,6 +1976,9 @@ static void write_metadata_tables(write_db_ctx_t *w, uint32_t *projects_root,
         write_table_btree(w->fp, &w->next_page, seq_recs, seq_lens, seq_rowids, PAIR_LEN, false);
     free(seq1);
     free(seq2);
+    return (*projects_root && *file_hashes_root && *summaries_root && *sqlite_seq_root)
+               ? 0
+               : ERR_WRITE_FAILED;
 }
 
 /* Write the SQLite file header on page 1 with master entries. */
@@ -2170,7 +2182,11 @@ static int write_db_after_nodes(write_db_ctx_t *w, uint32_t nodes_root) {
     uint32_t file_hashes_root;
     uint32_t summaries_root;
     uint32_t sqlite_seq_root;
-    write_metadata_tables(w, &projects_root, &file_hashes_root, &summaries_root, &sqlite_seq_root);
+    rc = write_metadata_tables(w, &projects_root, &file_hashes_root, &summaries_root,
+                               &sqlite_seq_root);
+    if (rc != 0) {
+        return discard_writer_output(w, rc);
+    }
     uint32_t next_page = w->next_page;
     CBM_PROF_END("write_db", "2_metadata_tables", t_meta);
 

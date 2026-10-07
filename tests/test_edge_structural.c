@@ -887,6 +887,93 @@ TEST(es_data_flows_crossfile_python) {
     PASS();
 }
 
+/* DATA_FLOWS properties carry the route and the caller's arguments. The "args" fragment was
+ * sliced one byte short (at the `[`), so the assembled JSON was always unbalanced, failed
+ * validation and fell back to {via, edge_type}: route and caller_args were never stored. */
+TEST(es_data_flows_keep_route_and_caller_args) {
+    /* Call arguments ride on HTTP_CALLS edges only on the parallel path, which a repository
+     * takes from 50 files up; pad the project past that. */
+    enum { FILLERS = 60 };
+    ES_LangFile f[2 + FILLERS];
+    char names[FILLERS][32];
+    f[0] = (ES_LangFile){"app.py",
+                         "from flask import Flask\n\napp = Flask(__name__)\n\n\n"
+                         "@app.route(\"/items\")\ndef list_items(limit):\n    return {\"items\": []}\n"};
+    f[1] = (ES_LangFile){"client.py",
+                         "def requests_get(url, params=None):\n    return {\"url\": url}\n\n\n"
+                         "def fetch_items():\n    return requests_get(\"/items\", 5)\n"};
+    for (int i = 0; i < FILLERS; i++) {
+        snprintf(names[i], sizeof(names[i]), "pad/m%d.py", i);
+        f[2 + i] = (ES_LangFile){names[i], "def helper():\n    return 1\n"};
+    }
+    ES_LangProj lp;
+    cbm_store_t *store = es_lang_index_files(&lp, f, 2 + FILLERS);
+    ASSERT_NOT_NULL(store);
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    int rc = cbm_store_find_edges_by_type(store, lp.project, "DATA_FLOWS", &edges, &count);
+    int with_route = 0;
+    int with_args = 0;
+    for (int i = 0; rc == CBM_STORE_OK && i < count; i++) {
+        const char *props = edges[i].properties_json ? edges[i].properties_json : "";
+        with_route += strstr(props, "\"route\":") != NULL;
+        with_args += strstr(props, "\"caller_args\":[{") != NULL;
+    }
+    if (with_args == 0 && count > 0) {
+        fprintf(stderr, "  DATA_FLOWS props: %s\n",
+                edges[0].properties_json ? edges[0].properties_json : "(null)");
+    }
+    cbm_store_free_edges(edges, count);
+    es_lang_cleanup(&lp, store);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_GT(count, 0);
+    ASSERT_GT(with_route, 0);
+    ASSERT_GT(with_args, 0);
+    PASS();
+}
+
+/* SvelteKit: the layout load and the page load of one directory are different routes, and
+ * an unrelated `routes` directory earlier in a monorepo path is not the route root. */
+static int es_count_routes_named(const ES_LangFile *files, int nfiles, const char *name) {
+    ES_LangProj lp;
+    cbm_store_t *store = es_lang_index_files(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    int matched = -1;
+    if (store && cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &count) ==
+                     CBM_STORE_OK) {
+        matched = 0;
+        for (int i = 0; i < count; i++) {
+            matched += nodes[i].name && strcmp(nodes[i].name, name) == 0;
+        }
+        if (matched == 0) {
+            for (int i = 0; i < count; i++) {
+                fprintf(stderr, "    route: %s (%s)\n", nodes[i].name ? nodes[i].name : "",
+                        nodes[i].qualified_name ? nodes[i].qualified_name : "");
+            }
+        }
+        cbm_store_free_nodes(nodes, count);
+    }
+    es_lang_cleanup(&lp, store);
+    return matched;
+}
+
+TEST(es_sveltekit_layout_and_page_load_are_distinct_routes) {
+    static const ES_LangFile f[] = {
+        {"src/routes/foo/+page.server.ts", "export function load() {\n  return {};\n}\n"},
+        {"src/routes/foo/+layout.server.ts", "export function load() {\n  return {};\n}\n"}};
+    ASSERT_EQ(es_count_routes_named(f, 2, "/foo"), 2);
+    PASS();
+}
+
+TEST(es_sveltekit_route_root_is_src_routes) {
+    static const ES_LangFile f[] = {
+        {"packages/routes/app/src/routes/items/+server.ts",
+         "export function GET() {\n  return new Response(\"ok\");\n}\n"}};
+    ASSERT_EQ(es_count_routes_named(f, 1, "/items"), 1);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  * FAMILY 9: TESTS cross-file (additional languages beyond Go)
  *
@@ -987,6 +1074,9 @@ SUITE(edge_structural) {
     /* ── FAMILY 8: DATA_FLOWS cross-file ─────────────────────── */
     /* Expected GREEN: route-intermediated path, language-independent. */
     RUN_TEST(es_data_flows_crossfile_python);
+    RUN_TEST(es_data_flows_keep_route_and_caller_args);
+    RUN_TEST(es_sveltekit_layout_and_page_load_are_distinct_routes);
+    RUN_TEST(es_sveltekit_route_root_is_src_routes);
 
     /* ── FAMILY 9: TESTS cross-file ──────────────────────────── */
     /* Expected GREEN: Python + TypeScript test file conventions. */

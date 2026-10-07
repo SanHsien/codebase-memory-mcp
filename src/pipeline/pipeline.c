@@ -675,6 +675,9 @@ static void free_seen_dir_key(const char *key, void *val, void *ud) {
 /* Walk directory chain upward, creating Folder nodes and CONTAINS_FOLDER edges. */
 static void create_folder_chain(cbm_pipeline_t *p, const char *dir, CBMHashTable *seen_dirs) {
     char *walk = strdup(dir);
+    if (!walk) {
+        return;
+    }
     while (walk[0] != '\0' && !cbm_ht_get(seen_dirs, walk)) {
         cbm_ht_set(seen_dirs, strdup(walk), intptr_to_ptr(SKIP_ONE));
         char *folder_qn = cbm_pipeline_fqn_folder(p->project_name, walk);

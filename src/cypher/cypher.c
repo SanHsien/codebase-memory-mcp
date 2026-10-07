@@ -844,6 +844,11 @@ static cbm_expr_t *expr_leaf(cbm_condition_t c) {
 
 static cbm_expr_t *expr_binary(cbm_expr_type_t type, cbm_expr_t *left, cbm_expr_t *right) {
     cbm_expr_t *e = calloc(CBM_ALLOC_ONE, sizeof(cbm_expr_t));
+    if (!e) {
+        expr_free(left);
+        expr_free(right);
+        return NULL;
+    }
     e->type = type;
     e->left = left;
     e->right = right;

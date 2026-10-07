@@ -21,6 +21,10 @@ long cbm_max_file_bytes(void) {
         if (errno == 0 && end != raw && *end == '\0' && v > 0) {
             return v;
         }
+        /* Larger than `long` holds (2 GiB on Windows): use the largest cap, not the default. */
+        if (errno == ERANGE && v == LONG_MAX && end != raw && *end == '\0') {
+            return LONG_MAX;
+        }
         /* Unparseable / non-positive → fall through to the safe default. */
     }
     return default_cap;

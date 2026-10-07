@@ -293,6 +293,9 @@ int cbm_compute_change_coupling(const cbm_commit_files_t *commits, int commit_co
                 size_t lb = strlen(b);
                 size_t pk_len = la + SKIP_ONE + lb + SKIP_ONE;
                 char *pk = malloc(pk_len);
+                if (!pk) {
+                    continue;
+                }
                 memcpy(pk, a, la);
                 pk[la] = '\x01';
                 memcpy(pk + la + SKIP_ONE, b, lb + SKIP_ONE);
@@ -307,13 +310,20 @@ int cbm_compute_change_coupling(const cbm_commit_files_t *commits, int commit_co
                     free(pk);
                 } else {
                     int *nv = malloc(sizeof(int));
-                    *nv = SKIP_ONE;
                     /* pair_counts takes ownership of pk; pair_timestamps
                      * needs its own copy. */
                     char *pk2 = malloc(pk_len);
+                    long long *nts = malloc(sizeof(long long));
+                    if (!nv || !pk2 || !nts) {
+                        free(nv);
+                        free(pk2);
+                        free(nts);
+                        free(pk);
+                        continue;
+                    }
+                    *nv = SKIP_ONE;
                     memcpy(pk2, pk, pk_len);
                     cbm_ht_set(pair_counts, pk, nv);
-                    long long *nts = malloc(sizeof(long long));
                     *nts = commits[c].timestamp;
                     cbm_ht_set(pair_timestamps, pk2, nts);
                 }

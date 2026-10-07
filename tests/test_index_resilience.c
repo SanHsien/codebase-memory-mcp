@@ -21,6 +21,7 @@
 #include <string.h>
 #include <time.h>
 #include <limits.h>
+#include "foundation/limits.h"
 
 /* glibc's _FORTIFY_SOURCE realpath() aborts unless the output buffer is at
  * least PATH_MAX bytes, independent of the actual path length. */
@@ -896,7 +897,18 @@ TEST(index_relative_repo_path_canonicalized) {
 #endif /* !_WIN32 */
 }
 
+/* A cap larger than `long` can hold (2 GiB on Windows, where `long` is 32-bit) overflowed
+ * strtol and silently fell back to the 512 MiB default: asking for more gave less. */
+TEST(max_file_bytes_beyond_long_range_clamps_instead_of_shrinking) {
+    cbm_setenv("CBM_MAX_FILE_BYTES", "99999999999999999999999", 1);
+    long cap = cbm_max_file_bytes();
+    cbm_unsetenv("CBM_MAX_FILE_BYTES");
+    ASSERT_EQ(cap, LONG_MAX);
+    PASS();
+}
+
 SUITE(index_resilience) {
+    RUN_TEST(max_file_bytes_beyond_long_range_clamps_instead_of_shrinking);
     RUN_TEST(index_oversized_file_reported);
     RUN_TEST(index_clean_run_no_logfile);
     RUN_TEST(index_parse_partial_reported);

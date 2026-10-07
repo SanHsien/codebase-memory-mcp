@@ -31,6 +31,7 @@
 // ask for.
 
 #include "cbm.h"
+#include "extract_node_stack.h"
 #include "arena.h"
 #include "helpers.h"
 #include "lang_specs.h"
@@ -81,22 +82,28 @@ static char *dbt_unquote(CBMArena *a, char *s) {
  * source('group', 'table') all name the relation in their final string
  * argument. The callee itself is an identifier, never a lit_string, so it
  * cannot be mistaken for one. */
-static TSNode dbt_last_lit_string(TSNode node, TSNode best, bool *found) {
-    if (strcmp(ts_node_type(node), "lit_string") == 0) {
-        best = node;
-        *found = true;
-    }
-    uint32_t cc = ts_node_child_count(node);
-    for (uint32_t i = 0; i < cc; i++) {
-        best = dbt_last_lit_string(ts_node_child(node, i), best, found);
+static TSNode dbt_last_lit_string(CBMExtractCtx *ctx, TSNode root, bool *found) {
+    /* Pre-order DFS: the last lit_string popped is the rightmost one. Iterative, like
+     * collect_dbt_refs below, so nesting depth cannot exhaust the native stack. */
+    TSNode best = {0};
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx, 64);
+    ts_nstack_push(&stack, root);
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        if (strcmp(ts_node_type(node), "lit_string") == 0) {
+            best = node;
+            *found = true;
+        }
+        ts_nstack_push_children(&stack, node);
     }
     return best;
 }
 
 /* Collect ref()/source() targets from a jinja2 parse tree into `out`, which is
  * the file's usage array. Usages are scoped to enclosing_qn (the Model). */
-static void collect_dbt_refs(CBMExtractCtx *ctx, TSNode node, const char *enclosing_qn,
-                             CBMUsageArray *out) {
+static void collect_dbt_ref_call(CBMExtractCtx *ctx, TSNode node, const char *enclosing_qn,
+                                 CBMUsageArray *out) {
     if (strcmp(ts_node_type(node), "fn_call") == 0) {
         TSNode fn = ts_node_child_by_field_name(node, "fn_name", (uint32_t)strlen("fn_name"));
         if (ts_node_is_null(fn)) {
@@ -106,8 +113,7 @@ static void collect_dbt_refs(CBMExtractCtx *ctx, TSNode node, const char *enclos
             char *fname = cbm_node_text(ctx->arena, fn, ctx->source);
             if (fname && (strcmp(fname, "ref") == 0 || strcmp(fname, "source") == 0)) {
                 bool found = false;
-                TSNode empty = {0};
-                TSNode strn = dbt_last_lit_string(node, empty, &found);
+                TSNode strn = dbt_last_lit_string(ctx, node, &found);
                 if (found) {
                     char *name =
                         dbt_unquote(ctx->arena, cbm_node_text(ctx->arena, strn, ctx->source));
@@ -123,9 +129,18 @@ static void collect_dbt_refs(CBMExtractCtx *ctx, TSNode node, const char *enclos
             }
         }
     }
-    uint32_t cc = ts_node_child_count(node);
-    for (uint32_t i = 0; i < cc; i++) {
-        collect_dbt_refs(ctx, ts_node_child(node, i), enclosing_qn, out);
+}
+
+/* Iterative: the recursive walk overflowed the stack on deeply nested Jinja. */
+static void collect_dbt_refs(CBMExtractCtx *ctx, TSNode root, const char *enclosing_qn,
+                             CBMUsageArray *out) {
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx, 256);
+    ts_nstack_push(&stack, root);
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        collect_dbt_ref_call(ctx, node, enclosing_qn, out);
+        ts_nstack_push_children(&stack, node);
     }
 }
 

@@ -12009,6 +12009,9 @@ static char *resolve_snippet_source(const char *root_path, const char *file_path
     }
     size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
     char *abs_path = malloc(apsz);
+    if (!abs_path) {
+        return NULL;
+    }
     snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
 
     *out_abs_path = abs_path;

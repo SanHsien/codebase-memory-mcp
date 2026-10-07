@@ -1567,6 +1567,12 @@ int cbm_registry_find_ending_with(const cbm_registry_t *r, const char *suffix, c
     /* Build ".suffix" target */
     size_t slen = strlen(suffix);
     char *target = malloc(slen + REG_SUFFIX_ALLOC);
+    if (!target) {
+        if (out) {
+            *out = NULL;
+        }
+        return 0;
+    }
     target[0] = '.';
     memcpy(target + SKIP_ONE, suffix, slen + SKIP_ONE);
 

@@ -2564,7 +2564,11 @@ int cbm_store_delete_project(cbm_store_t *s, const char *name) {
         (void)exec_sql(s, "ROLLBACK;");
         return CBM_STORE_ERR;
     }
-    return exec_sql(s, "COMMIT;");
+    if (exec_sql(s, "COMMIT;") != CBM_STORE_OK) {
+        (void)exec_sql(s, "ROLLBACK;");
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
 }
 
 /* ── Node CRUD ──────────────────────────────────────────────────── */
@@ -3159,18 +3163,28 @@ int cbm_store_upsert_node_batch(cbm_store_t *s, const cbm_node_t *nodes, int cou
         return CBM_STORE_OK;
     }
 
-    exec_sql(s, "BEGIN IMMEDIATE;");
+    /* Inside a caller's transaction BEGIN fails and the old unconditional COMMIT then
+     * committed the caller's work; join it instead and leave commit to the caller. */
+    bool own_txn = sqlite3_get_autocommit(s->db) != 0;
+    if (own_txn && exec_sql(s, "BEGIN IMMEDIATE;") != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     for (int i = 0; i < count; i++) {
         int64_t id = cbm_store_upsert_node(s, &nodes[i]);
         if (id == CBM_STORE_ERR) {
-            exec_sql(s, "ROLLBACK;");
+            if (own_txn) {
+                (void)exec_sql(s, "ROLLBACK;");
+            }
             return CBM_STORE_ERR;
         }
         if (out_ids) {
             out_ids[i] = id;
         }
     }
-    exec_sql(s, "COMMIT;");
+    if (own_txn && exec_sql(s, "COMMIT;") != CBM_STORE_OK) {
+        (void)exec_sql(s, "ROLLBACK;");
+        return CBM_STORE_ERR;
+    }
     return CBM_STORE_OK;
 }
 
@@ -3483,15 +3497,25 @@ int cbm_store_insert_edge_batch(cbm_store_t *s, const cbm_edge_t *edges, int cou
         return CBM_STORE_OK;
     }
 
-    exec_sql(s, "BEGIN IMMEDIATE;");
+    /* Inside a caller's transaction BEGIN fails and the old unconditional COMMIT then
+     * committed the caller's work; join it instead and leave commit to the caller. */
+    bool own_txn = sqlite3_get_autocommit(s->db) != 0;
+    if (own_txn && exec_sql(s, "BEGIN IMMEDIATE;") != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
     for (int i = 0; i < count; i++) {
         int64_t id = cbm_store_insert_edge(s, &edges[i]);
         if (id == CBM_STORE_ERR) {
-            exec_sql(s, "ROLLBACK;");
+            if (own_txn) {
+                (void)exec_sql(s, "ROLLBACK;");
+            }
             return CBM_STORE_ERR;
         }
     }
-    exec_sql(s, "COMMIT;");
+    if (own_txn && exec_sql(s, "COMMIT;") != CBM_STORE_OK) {
+        (void)exec_sql(s, "ROLLBACK;");
+        return CBM_STORE_ERR;
+    }
     return CBM_STORE_OK;
 }
 
@@ -3722,6 +3746,20 @@ static void cov_dir_ids_free(CBMHashTable *ht) {
     cbm_ht_free(ht);
 }
 
+/* Record the fingerprint the shadow graph now reflects. Every path that wipes the graph
+ * must call this: an empty result left the old fingerprint behind, so when the same
+ * failures came back the rebuild was skipped and the miss graph stayed empty. */
+static void cov_store_shadow_fp(cbm_store_t *s, const char *fp_key, const char *fp) {
+    sqlite3_stmt *set = NULL;
+    if (sqlite3_prepare_v2(s->db, "INSERT OR REPLACE INTO store_meta (k, v) VALUES (?1, ?2);",
+                           CBM_NOT_FOUND, &set, NULL) == SQLITE_OK) {
+        bind_text(set, SKIP_ONE, fp_key);
+        bind_text(set, ST_COL_2, fp);
+        (void)sqlite3_step(set);
+        sqlite3_finalize(set);
+    }
+}
+
 static int cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
     char covproj[CBM_SZ_512];
     cbm_store_coverage_shadow_project(covproj, sizeof(covproj), project);
@@ -3784,6 +3822,7 @@ static int cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
     }
     if (count == 0) {
         cbm_store_free_coverage(rows, count);
+        cov_store_shadow_fp(s, fp_key, fp);
         return CBM_STORE_OK;
     }
     /* Only FAILURE rows materialize in the miss graph; a project whose only
@@ -3797,6 +3836,7 @@ static int cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
     }
     if (failure_count == 0) {
         cbm_store_free_coverage(rows, count);
+        cov_store_shadow_fp(s, fp_key, fp);
         return CBM_STORE_OK;
     }
 
@@ -3925,16 +3965,7 @@ static int cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
     }
     cov_dir_ids_free(dir_ids);
     cbm_store_free_coverage(rows, count);
-    {
-        sqlite3_stmt *set = NULL;
-        if (sqlite3_prepare_v2(s->db, "INSERT OR REPLACE INTO store_meta (k, v) VALUES (?1, ?2);",
-                               CBM_NOT_FOUND, &set, NULL) == SQLITE_OK) {
-            bind_text(set, SKIP_ONE, fp_key);
-            bind_text(set, ST_COL_2, fp);
-            (void)sqlite3_step(set);
-            sqlite3_finalize(set);
-        }
-    }
+    cov_store_shadow_fp(s, fp_key, fp);
     return CBM_STORE_OK;
 }
 
@@ -4397,17 +4428,31 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
-    /* Match QNs ending with ".suffix" or exactly equal to suffix */
+    /* Match QNs ending with ".suffix" or exactly equal to suffix. LIKE alone treated `_`
+     * and `%` in the name as wildcards and ignored ASCII case (`my_func` matched
+     * `a.myXfunc` and `a.MY_FUNC`), so the LIKE only narrows and an exact tail comparison
+     * decides. */
     char like_pattern[CBM_SZ_512];
-    snprintf(like_pattern, sizeof(like_pattern), "%%.%s", suffix);
+    size_t lp = 0;
+    like_pattern[lp++] = '%';
+    like_pattern[lp++] = '.';
+    for (const char *c = suffix ? suffix : ""; *c && lp + 3 < sizeof(like_pattern); c++) {
+        if (*c == '\\' || *c == '%' || *c == '_') {
+            like_pattern[lp++] = '\\';
+        }
+        like_pattern[lp++] = *c;
+    }
+    like_pattern[lp] = '\0';
 
     const char *sql_with_project =
         "SELECT id, project, label, name, qualified_name, file_path, "
         "start_line, end_line, properties FROM nodes "
-        "WHERE project = ?1 AND (qualified_name LIKE ?2 OR qualified_name = ?3)";
+        "WHERE project = ?1 AND (qualified_name = ?3 OR (qualified_name LIKE ?2 ESCAPE '\\' "
+        "AND substr(qualified_name, -length(?3) - 1) = '.' || ?3))";
     const char *sql_any = "SELECT id, project, label, name, qualified_name, file_path, "
                           "start_line, end_line, properties FROM nodes "
-                          "WHERE (qualified_name LIKE ?1 OR qualified_name = ?2)";
+                          "WHERE (qualified_name = ?2 OR (qualified_name LIKE ?1 ESCAPE '\\' "
+                          "AND substr(qualified_name, -length(?2) - 1) = '.' || ?2))";
 
     sqlite3_stmt *stmt = NULL;
     int rc =
@@ -4706,27 +4751,34 @@ int cbm_store_batch_count_degrees(cbm_store_t *s, const int64_t *node_ids, int i
     memset(out_in, 0, (size_t)id_count * sizeof(int));
     memset(out_out, 0, (size_t)id_count * sizeof(int));
 
-    /* Build IN clause: (?,?,?) */
-    char in_clause[CBM_SZ_4K];
-    int pos = 0;
-    for (int i = 0; i < id_count && pos < (int)sizeof(in_clause) - ST_IN_CLAUSE_MARGIN; i++) {
-        if (i > 0) {
-            in_clause[pos++] = ',';
-        }
-        in_clause[pos++] = '?';
-    }
-    in_clause[pos] = '\0';
-
+    /* The IN clause holds a bounded number of placeholders. Ids beyond it used to be left
+     * unbound while the edge type was bound at id_count + 1, past the last placeholder, so
+     * the type filter became NULL and every degree came back 0. Count in chunks instead. */
+    enum { DEGREE_CHUNK = (CBM_SZ_4K - ST_IN_CLAUSE_MARGIN) / 2 };
     bool has_type = edge_type && edge_type[0] != '\0';
-
-    int rc = count_degrees_direction(s, node_ids, id_count, in_clause, has_type, edge_type, true,
-                                     out_in);
-    if (rc != CBM_STORE_OK) {
-        return rc;
+    for (int off = 0; off < id_count; off += DEGREE_CHUNK) {
+        int n = id_count - off < DEGREE_CHUNK ? id_count - off : DEGREE_CHUNK;
+        char in_clause[CBM_SZ_4K];
+        int pos = 0;
+        for (int i = 0; i < n; i++) {
+            if (i > 0) {
+                in_clause[pos++] = ',';
+            }
+            in_clause[pos++] = '?';
+        }
+        in_clause[pos] = '\0';
+        int rc = count_degrees_direction(s, node_ids + off, n, in_clause, has_type, edge_type, true,
+                                         out_in + off);
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
+        rc = count_degrees_direction(s, node_ids + off, n, in_clause, has_type, edge_type, false,
+                                     out_out + off);
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
     }
-
-    return count_degrees_direction(s, node_ids, id_count, in_clause, has_type, edge_type, false,
-                                   out_out);
+    return CBM_STORE_OK;
 }
 
 /* ── UpsertFileHashBatch ───────────────────────────────────────── */
@@ -6409,7 +6461,8 @@ int cbm_store_count_nodes_scoped(cbm_store_t *s, const char *project, const char
     }
     bind_text(stmt, ST_COL_1, project);
     arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
-    int n = 0;
+    /* A step without a row is a failed read, not a count of zero (same as the unscoped counts). */
+    int n = CBM_STORE_ERR;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         n = sqlite3_column_int(stmt, 0);
     }
@@ -6441,7 +6494,8 @@ int cbm_store_count_edges_scoped(cbm_store_t *s, const char *project, const char
     }
     bind_text(stmt, ST_COL_1, project);
     arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
-    int n = 0;
+    /* A step without a row is a failed read, not a count of zero (same as the unscoped counts). */
+    int n = CBM_STORE_ERR;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         n = sqlite3_column_int(stmt, 0);
     }
@@ -7011,11 +7065,14 @@ static int arch_entry_points(cbm_store_t *s, const char *project, const char *pa
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
     char sqlbuf[ST_SQL_BUF];
-    const char *base = "SELECT name, qualified_name, file_path FROM nodes "
-                       "WHERE project=?1 AND json_extract(properties, '$.is_entry_point') = 1 "
-                       "AND (json_extract(properties, '$.is_test') IS NULL OR "
-                       "json_extract(properties, '$.is_test') != 1) "
-                       "AND file_path NOT LIKE '%test%'";
+    const char *base =
+        "SELECT name, qualified_name, file_path FROM nodes "
+        "WHERE project=?1 AND json_extract(CASE WHEN json_valid(properties) THEN properties END, "
+        "'$.is_entry_point') = 1 "
+        "AND (json_extract(CASE WHEN json_valid(properties) THEN properties END, '$.is_test') IS "
+        "NULL OR "
+        "json_extract(CASE WHEN json_valid(properties) THEN properties END, '$.is_test') != 1) "
+        "AND file_path NOT LIKE '%test%'";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf), "%s%s LIMIT 20", base, arch_path_scope_sql());
     } else {
@@ -7088,10 +7145,12 @@ static int arch_routes(cbm_store_t *s, const char *project, const char *path,
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
     char sqlbuf[ST_SQL_BUF];
-    const char *base = "SELECT name, properties, COALESCE(file_path, '') FROM nodes "
-                       "WHERE project=?1 AND label='Route' "
-                       "AND (json_extract(properties, '$.is_test') IS NULL OR "
-                       "json_extract(properties, '$.is_test') != 1)";
+    const char *base =
+        "SELECT name, properties, COALESCE(file_path, '') FROM nodes "
+        "WHERE project=?1 AND label='Route' "
+        "AND (json_extract(CASE WHEN json_valid(properties) THEN properties END, '$.is_test') IS "
+        "NULL OR "
+        "json_extract(CASE WHEN json_valid(properties) THEN properties END, '$.is_test') != 1)";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf), "%s%s LIMIT 20", base, arch_path_scope_sql());
     } else {
@@ -7164,12 +7223,14 @@ static int arch_hotspots(cbm_store_t *s, const char *project, const char *path,
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
     char sqlbuf[ST_SQL_BUF];
-    const char *base = "SELECT n.name, n.qualified_name, COUNT(*) as fan_in "
-                       "FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                       "WHERE n.project=?1 AND n.label IN ('Function', 'Method') "
-                       "AND (json_extract(n.properties, '$.is_test') IS NULL OR "
-                       "json_extract(n.properties, '$.is_test') != 1) "
-                       "AND n.file_path NOT LIKE '%test%'";
+    const char *base =
+        "SELECT n.name, n.qualified_name, COUNT(*) as fan_in "
+        "FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+        "WHERE n.project=?1 AND n.label IN ('Function', 'Method') "
+        "AND (json_extract(CASE WHEN json_valid(n.properties) THEN n.properties END, '$.is_test') "
+        "IS NULL OR "
+        "json_extract(CASE WHEN json_valid(n.properties) THEN n.properties END, '$.is_test') != 1) "
+        "AND n.file_path NOT LIKE '%test%'";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf),
                  "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3 ESCAPE '\\') "
@@ -7674,7 +7735,8 @@ static int arch_layers(cbm_store_t *s, const char *project, const char *path,
     char *entry_pkgs[CBM_SZ_32];
     int nepkgs = collect_pkg_names(s,
                                    "SELECT qualified_name FROM nodes WHERE project=?1 AND "
-                                   "json_extract(properties, '$.is_entry_point') = 1",
+                                   "json_extract(CASE WHEN json_valid(properties) THEN properties "
+                                   "END, '$.is_entry_point') = 1",
                                    project, path, entry_pkgs, CBM_SZ_32);
 
     /* Compute fan-in/out per package */
@@ -8673,8 +8735,10 @@ static void cluster_build_one(cbm_cluster_info_t *ci, int c, int n, const int *c
     }
 
     ci->edge_types = malloc(sizeof(char *));
-    ci->edge_types[0] = heap_strdup("CALLS");
-    ci->edge_type_count = 1;
+    if (ci->edge_types) {
+        ci->edge_types[0] = heap_strdup("CALLS");
+        ci->edge_type_count = 1;
+    }
 }
 
 /* Comparator for sorting community indices by descending member count. */
@@ -9103,10 +9167,16 @@ static char *adr_try_section_header(const char *line, int line_len) {
 
 /* Append a line to the current section content buffer. */
 static void adr_append_line(char *buf, int buf_sz, int *len, const char *line, int line_len) {
-    if (*len > 0) {
+    /* A dropped line must not still write its newline: past a full buffer that walked
+     * `*len` (and the write) beyond the end, one byte per extra line. */
+    int sep = *len > 0 ? 1 : 0;
+    if (*len + sep + line_len >= buf_sz - SKIP_ONE) {
+        return;
+    }
+    if (sep) {
         buf[(*len)++] = '\n';
     }
-    if (*len + line_len < buf_sz - SKIP_ONE) {
+    {
         memcpy(buf + *len, line, line_len);
         *len += line_len;
         buf[*len] = '\0';

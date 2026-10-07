@@ -780,6 +780,34 @@ TEST(lsp_kotlin_deep_nesting_no_crash) {
  * other suite finished underneath it). Pure re-registration — the 20
  * RUN_TEST entries are exactly the ones the single suite carried; the
  * before/after test-count parity is asserted in the shard runner. */
+/* The dbt Jinja walk recursed once per syntax level with no cap; deeply nested calls
+ * overflowed the stack. Same depth as the other *_deep_* cases. */
+static char *so_nested_calls(const char *prefix, const char *suffix, int depth) {
+    size_t sz = strlen(prefix) + strlen(suffix) + (size_t)depth * 3 + 16;
+    char *src = malloc(sz);
+    if (!src) {
+        return NULL;
+    }
+    char *p = src + snprintf(src, sz, "%s", prefix);
+    for (int i = 0; i < depth; i++) {
+        *p++ = 'f';
+        *p++ = '(';
+    }
+    *p++ = '1';
+    memset(p, ')', (size_t)depth);
+    p += depth;
+    snprintf(p, sz - (size_t)(p - src), "%s", suffix);
+    return src;
+}
+
+TEST(dbt_deep_jinja_nesting_no_crash) {
+    char *src = so_nested_calls("select 1 from {{ ref('a') }} {{ ", " }}\n", 30000);
+    ASSERT_NOT_NULL(src);
+    ASSERT_FALSE(so_extract_crashes(src, CBM_LANG_SQL, "models/deep.sql"));
+    free(src);
+    PASS();
+}
+
 SUITE(stack_overflow_a) {
     cbm_init();
 
@@ -797,6 +825,7 @@ SUITE(stack_overflow_a) {
 SUITE(stack_overflow_b) {
     cbm_init();
 
+    RUN_TEST(dbt_deep_jinja_nesting_no_crash);
     RUN_TEST(perl_glr_deep_parse_recursion_capped);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);
     RUN_TEST(lsp_python_deep_nesting_no_crash);

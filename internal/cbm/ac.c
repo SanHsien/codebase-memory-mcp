@@ -188,6 +188,9 @@ CBMAutomaton *cbm_ac_build(const char **patterns, const int *lengths, int count,
     }
 
     CBMAutomaton *ac = (CBMAutomaton *)calloc(CBM_AC_ALLOC_ONE, sizeof(CBMAutomaton));
+    if (!ac) {
+        return NULL;
+    }
     ac->alpha_size = alpha_size;
     ac->num_patterns = count;
 
@@ -200,10 +203,14 @@ CBMAutomaton *cbm_ac_build(const char **patterns, const int *lengths, int count,
     }
 
     ac->go_table = (int *)malloc((size_t)max_states * alpha_size * sizeof(int));
-    memset(ac->go_table, CBM_AC_NO_STATE, (size_t)max_states * alpha_size * sizeof(int));
     ac->output = (uint64_t *)calloc(max_states, sizeof(uint64_t));
     ac->output_list = (int *)malloc(max_states * sizeof(int));
     ac->output_next = (int *)malloc(max_states * sizeof(int));
+    if (!ac->go_table || !ac->output || !ac->output_list || !ac->output_next) {
+        cbm_ac_free(ac);
+        return NULL;
+    }
+    memset(ac->go_table, CBM_AC_NO_STATE, (size_t)max_states * alpha_size * sizeof(int));
     for (int i = 0; i < max_states; i++) {
         ac->output_list[i] = CBM_AC_NO_STATE;
         ac->output_next[i] = CBM_AC_NO_STATE;

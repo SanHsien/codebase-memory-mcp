@@ -22,6 +22,7 @@
  */
 #include "test_framework.h"
 #include <store/store.h>
+#include <sqlite3.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1708,7 +1709,154 @@ TEST(store_scoped_counts_treat_like_wildcards_literally) {
     PASS();
 }
 
+/* A COUNT(*) that cannot be read (busy, I/O error, corruption) is not a count of zero.
+ * The unscoped counts already report it as CBM_STORE_ERR; the scoped ones returned 0.
+ * A LIKE pattern longer than the connection limit fails at step time (the pattern is a
+ * bound parameter, so prepare still succeeds), which makes the read fail on demand. */
+TEST(store_scoped_counts_report_a_failed_read) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "failread", "/tmp/failread"), 0);
+    cbm_node_t a = {.project = "failread",
+                    .label = "Function",
+                    .name = "a",
+                    .qualified_name = "failread.a",
+                    .file_path = "src/a.py"};
+    cbm_node_t b = {.project = "failread",
+                    .label = "Function",
+                    .name = "b",
+                    .qualified_name = "failread.b",
+                    .file_path = "src/b.py"};
+    int64_t id_a = cbm_store_upsert_node(s, &a);
+    int64_t id_b = cbm_store_upsert_node(s, &b);
+    ASSERT_GT(id_a, 0);
+    ASSERT_GT(id_b, 0);
+    cbm_edge_t e = {.project = "failread", .source_id = id_a, .target_id = id_b, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(s, &e), 0);
+    ASSERT_EQ(cbm_store_count_nodes_scoped(s, "failread", "src"), 2);
+    ASSERT_EQ(cbm_store_count_edges_scoped(s, "failread", "src"), 1);
+
+    struct sqlite3 *db = cbm_store_get_db(s);
+    ASSERT_NOT_NULL(db);
+    int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 2);
+    int nodes = cbm_store_count_nodes_scoped(s, "failread", "src");
+    int edges = cbm_store_count_edges_scoped(s, "failread", "src");
+    sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, old_limit);
+    ASSERT_EQ(nodes, CBM_STORE_ERR);
+    ASSERT_EQ(edges, CBM_STORE_ERR);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* More ids than the IN clause holds: the edge-type parameter was bound past the last
+ * placeholder, so the type filter was NULL and every degree came back 0. */
+TEST(store_batch_degrees_beyond_in_clause_capacity) {
+    enum { N = 3000 };
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "deg", "/tmp/deg"), 0);
+    cbm_node_t caller = {.project = "deg",
+                         .label = "Function",
+                         .name = "caller",
+                         .qualified_name = "deg.caller",
+                         .file_path = "a.py"};
+    int64_t caller_id = cbm_store_upsert_node(s, &caller);
+    ASSERT_GT(caller_id, 0);
+    int64_t *ids = malloc(sizeof(int64_t) * N);
+    int *in = malloc(sizeof(int) * N);
+    int *out = malloc(sizeof(int) * N);
+    ASSERT_NOT_NULL(ids);
+    ASSERT_NOT_NULL(in);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ(cbm_store_begin(s), CBM_STORE_OK);
+    for (int i = 0; i < N; i++) {
+        char name[32];
+        char qn[48];
+        snprintf(name, sizeof(name), "f%d", i);
+        snprintf(qn, sizeof(qn), "deg.f%d", i);
+        cbm_node_t n = {.project = "deg",
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "a.py"};
+        ids[i] = cbm_store_upsert_node(s, &n);
+        cbm_edge_t e = {
+            .project = "deg", .source_id = caller_id, .target_id = ids[i], .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+    ASSERT_EQ(cbm_store_commit(s), CBM_STORE_OK);
+    int rc = cbm_store_batch_count_degrees(s, ids, N, "CALLS", in, out);
+    int ones = 0;
+    for (int i = 0; i < N; i++) {
+        ones += in[i] == 1;
+    }
+    free(ids);
+    free(in);
+    free(out);
+    cbm_store_close(s);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(ones, N);
+    PASS();
+}
+
+/* json_extract raises on malformed JSON, so one bad properties row (legacy databases have
+ * them) failed the whole architecture call. */
+TEST(store_architecture_survives_malformed_properties) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "badjson", "/tmp/badjson"), 0);
+    cbm_node_t a = {.project = "badjson",
+                    .label = "Function",
+                    .name = "a",
+                    .qualified_name = "badjson.a",
+                    .file_path = "src/a.py"};
+    cbm_node_t b = {.project = "badjson",
+                    .label = "Function",
+                    .name = "b",
+                    .qualified_name = "badjson.b",
+                    .file_path = "src/b.py",
+                    .properties_json = "{\"is_entry_point\":true}"};
+    int64_t id_a = cbm_store_upsert_node(s, &a);
+    int64_t id_b = cbm_store_upsert_node(s, &b);
+    cbm_edge_t e = {.project = "badjson", .source_id = id_b, .target_id = id_a, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(s, &e), 0);
+    ASSERT_EQ(cbm_store_exec(s, "UPDATE nodes SET properties = '{broken' WHERE name = 'a';"), 0);
+    const char *aspects[] = {"entry_points", "hotspots"};
+    cbm_architecture_info_t info = {0};
+    int rc = cbm_store_get_architecture(s, "badjson", NULL, aspects, 2, &info);
+    int entries = info.entry_point_count;
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(entries, 1);
+    PASS();
+}
+
+/* A section longer than the 8 KiB content buffer, followed by more lines, wrote one newline
+ * per extra line past the end of the stack buffer. */
+TEST(store_adr_parse_overlong_section_stays_in_bounds) {
+    enum { LONG_LINE = 8000, EXTRA = 2000 }; /* fits, then fills the buffer and goes past */
+    size_t sz = 64 + LONG_LINE + EXTRA * 8;
+    char *doc = malloc(sz);
+    ASSERT_NOT_NULL(doc);
+    char *p = doc + snprintf(doc, sz, "## PURPOSE\n");
+    memset(p, 'x', LONG_LINE);
+    p += LONG_LINE;
+    *p++ = '\n';
+    for (int i = 0; i < EXTRA; i++) {
+        p += snprintf(p, sz - (size_t)(p - doc), "line\n");
+    }
+    cbm_adr_sections_t sections = cbm_adr_parse_sections(doc);
+    cbm_adr_sections_free(&sections);
+    free(doc);
+    PASS();
+}
+
 SUITE(store_arch) {
+    RUN_TEST(store_batch_degrees_beyond_in_clause_capacity);
+    RUN_TEST(store_architecture_survives_malformed_properties);
+    RUN_TEST(store_adr_parse_overlong_section_stays_in_bounds);
+    RUN_TEST(store_scoped_counts_report_a_failed_read);
     RUN_TEST(store_scoped_counts_treat_like_wildcards_literally);
     /* Architecture */
     RUN_TEST(arch_get_all);

@@ -2392,7 +2392,89 @@ TEST(store_coverage_replace_rolls_back_when_shadow_rebuild_fails) {
     PASS();
 }
 
+/* `_` in a name was a LIKE wildcard and LIKE ignores ASCII case, so a suffix lookup for
+ * `my_func` also returned `a.myXfunc` and `a.MY_FUNC`. */
+TEST(store_qn_suffix_is_exact) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "sfx", "/tmp/sfx"), 0);
+    const char *qns[] = {"sfx.a.my_func", "sfx.a.myXfunc", "sfx.b.MY_FUNC", "sfx.c.not_my_func"};
+    for (int i = 0; i < 4; i++) {
+        cbm_node_t n = {.project = "sfx",
+                        .label = "Function",
+                        .name = "f",
+                        .qualified_name = qns[i],
+                        .file_path = "a.py"};
+        ASSERT_GT(cbm_store_upsert_node(s, &n), 0);
+    }
+    cbm_node_t *out = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_qn_suffix(s, "sfx", "my_func", &out, &count), CBM_STORE_OK);
+    int exact = count == 1 && strcmp(out[0].qualified_name, "sfx.a.my_func") == 0;
+    cbm_store_free_nodes(out, count);
+    cbm_store_close(s);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(exact);
+    PASS();
+}
+
+/* When the failures cleared, the shadow graph was wiped but its fingerprint was kept, so
+ * when the same failures returned the rebuild was skipped and the graph stayed empty. */
+TEST(store_coverage_shadow_rebuilds_after_failures_return) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "cov", "/tmp/cov");
+    cbm_store_upsert_file_hash(s, "cov", "src/a.py", "", 1, 10);
+    cbm_coverage_row_t rows[] = {
+        {.rel_path = "src/a.py", .kind = "parse_partial", .detail = "4-7"}};
+    cbm_node_t *nodes = NULL;
+    int nc = 0;
+    ASSERT_EQ(cbm_store_coverage_replace(s, "cov", rows, 1), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "cov::missed", "File", &nodes, &nc), CBM_STORE_OK);
+    ASSERT_EQ(nc, 1);
+    cbm_store_free_nodes(nodes, nc);
+    ASSERT_EQ(cbm_store_coverage_replace(s, "cov", NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_coverage_replace(s, "cov", rows, 1), CBM_STORE_OK);
+    nodes = NULL;
+    nc = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "cov::missed", "File", &nodes, &nc), CBM_STORE_OK);
+    cbm_store_free_nodes(nodes, nc);
+    cbm_store_close(s);
+    ASSERT_EQ(nc, 1);
+    PASS();
+}
+
+/* Called inside a caller's transaction, the batch's BEGIN failed silently and its COMMIT
+ * then committed the caller's transaction, so the caller could no longer roll back. */
+TEST(store_node_batch_joins_caller_transaction) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "txn", "/tmp/txn"), 0);
+    cbm_node_t batch[] = {
+        {.project = "txn",
+         .label = "Function",
+         .name = "a",
+         .qualified_name = "txn.a",
+         .file_path = "a.py"},
+        {.project = "txn",
+         .label = "Function",
+         .name = "b",
+         .qualified_name = "txn.b",
+         .file_path = "a.py"},
+    };
+    ASSERT_EQ(cbm_store_exec(s, "BEGIN;"), 0);
+    ASSERT_EQ(cbm_store_upsert_node_batch(s, batch, 2, NULL), CBM_STORE_OK);
+    int rolled_back = cbm_store_exec(s, "ROLLBACK;");
+    int left = cbm_store_count_nodes(s, "txn");
+    cbm_store_close(s);
+    ASSERT_EQ(rolled_back, 0);
+    ASSERT_EQ(left, 0);
+    PASS();
+}
+
 SUITE(store_nodes) {
+    RUN_TEST(store_qn_suffix_is_exact);
+    RUN_TEST(store_coverage_shadow_rebuilds_after_failures_return);
+    RUN_TEST(store_node_batch_joins_caller_transaction);
     RUN_TEST(store_coverage_roundtrip_prune_shadow);
     RUN_TEST(store_coverage_targeted_path_and_scope_lookup);
     RUN_TEST(store_coverage_meta_zero_row_truncation_and_delete);

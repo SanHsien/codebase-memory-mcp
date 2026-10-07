@@ -1586,7 +1586,52 @@ TEST(config_toml_codex_hooks_accept_install_path_with_spaces) {
     PASS();
 }
 
+/* A TOML array may span lines and hold arrays, so a line like `  [1]` inside it is an
+ * array element, not a table header. Treating it as a header cut the owning table short:
+ * a remove left the rest of the array behind as broken TOML, and a valid file with such
+ * an array elsewhere was refused. */
+TEST(config_toml_nested_array_element_is_not_a_table_header) {
+    char dir[CTE_PATH_CAP];
+    char path[CTE_PATH_CAP];
+    char actual[CTE_FILE_CAP];
+    ASSERT_EQ(cte_fixture(dir, sizeof(dir), path, sizeof(path)), 0);
+
+    /* the array is in the target table: remove must take all of it */
+    ASSERT_EQ(th_write_file(path, "[[mcp_servers]]\n"
+                                  "name = \"codebase-memory-mcp\"\n"
+                                  "args = [\n"
+                                  "  \"--x\",\n"
+                                  "  [1]\n"
+                                  "]\n\n"
+                                  "[[mcp_servers]]\n"
+                                  "name = \"other\"\n"),
+              0);
+    ASSERT_EQ(cbm_toml_remove_named_array_table(path, CTE_TABLE, CTE_KEY, CTE_IDENTITY), 0);
+    ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
+    ASSERT_NULL(strstr(actual, "[1]"));
+    ASSERT_NULL(strstr(actual, "--x"));
+    ASSERT_NOT_NULL(strstr(actual, "name = \"other\""));
+    ASSERT_EQ(cte_occurrences(actual, "[[mcp_servers]]"), 1);
+
+    /* the array is in a foreign table: the file is valid and must be edited, the array kept */
+    const char *foreign = "[[mcp_servers]]\n"
+                          "name = \"other\"\n"
+                          "args = [\n"
+                          "  [\"a\"]\n"
+                          "]\n";
+    ASSERT_EQ(th_write_file(path, foreign), 0);
+    ASSERT_EQ(cbm_toml_upsert_named_array_table(path, CTE_TABLE, CTE_KEY, CTE_IDENTITY, CTE_BODY),
+              0);
+    ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
+    ASSERT_NOT_NULL(strstr(actual, "args = [\n  [\"a\"]\n]\n"));
+    ASSERT_NOT_NULL(strstr(actual, CTE_IDENTITY));
+    ASSERT_EQ(cte_occurrences(actual, "[[mcp_servers]]"), 2);
+    th_cleanup(dir);
+    PASS();
+}
+
 SUITE(config_toml_edit) {
+    RUN_TEST(config_toml_nested_array_element_is_not_a_table_header);
     RUN_TEST(config_toml_codex_hooks_accept_install_path_with_spaces);
     RUN_TEST(config_toml_remove_self_heals_orphan_closing_marker_issue1558);
     RUN_TEST(config_toml_remove_self_heals_orphan_opening_marker_issue1558);

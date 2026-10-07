@@ -818,22 +818,34 @@ enum {
     TOML_STRING_MULTILINE_LITERAL = 2,
 };
 
+/* The scan state also counts open `[` of a value that continues on later lines. Inside such
+ * an array a line like `  [1]` is an element, not a table header, and every caller already
+ * skips header and assignment parsing while the state is not TOML_STRING_NONE. */
+enum {
+    TOML_STRING_KIND_MASK = 3,
+    TOML_ARRAY_DEPTH_SHIFT = 2,
+    TOML_ARRAY_MAX_DEPTH = 1024,
+};
+
 static int toml_scan_line_strings(const char *data, const toml_line_t *line, int *multiline_state) {
+    int kind = *multiline_state & TOML_STRING_KIND_MASK;
+    int depth = *multiline_state >> TOML_ARRAY_DEPTH_SHIFT;
+    int rc = TOML_EDIT_OK;
     size_t pos = line->start;
     if (line->start == 0 && line->content_end >= 3U && (unsigned char)data[0] == 0xefU &&
         (unsigned char)data[1] == 0xbbU && (unsigned char)data[2] == 0xbfU) {
         pos = 3U;
     }
     while (pos < line->content_end) {
-        if (*multiline_state != TOML_STRING_NONE) {
-            char quote = *multiline_state == TOML_STRING_MULTILINE_BASIC ? '"' : '\'';
-            if (*multiline_state == TOML_STRING_MULTILINE_BASIC && data[pos] == '\\') {
+        if (kind != TOML_STRING_NONE) {
+            char quote = kind == TOML_STRING_MULTILINE_BASIC ? '"' : '\'';
+            if (kind == TOML_STRING_MULTILINE_BASIC && data[pos] == '\\') {
                 pos += pos + 1U < line->content_end ? 2U : 1U;
                 continue;
             }
             if (pos + 2U < line->content_end && data[pos] == quote && data[pos + 1U] == quote &&
                 data[pos + 2U] == quote) {
-                *multiline_state = TOML_STRING_NONE;
+                kind = TOML_STRING_NONE;
                 pos += 3U;
                 continue;
             }
@@ -842,7 +854,22 @@ static int toml_scan_line_strings(const char *data, const toml_line_t *line, int
         }
 
         if (data[pos] == '#') {
-            return TOML_EDIT_OK;
+            break;
+        }
+        if (data[pos] == '[') {
+            if (++depth > TOML_ARRAY_MAX_DEPTH) {
+                rc = TOML_EDIT_ERR;
+                break;
+            }
+            pos++;
+            continue;
+        }
+        if (data[pos] == ']') {
+            if (depth > 0) {
+                depth--;
+            }
+            pos++;
+            continue;
         }
         if (data[pos] != '"' && data[pos] != '\'') {
             pos++;
@@ -850,8 +877,7 @@ static int toml_scan_line_strings(const char *data, const toml_line_t *line, int
         }
         char quote = data[pos];
         if (pos + 2U < line->content_end && data[pos + 1U] == quote && data[pos + 2U] == quote) {
-            *multiline_state =
-                quote == '"' ? TOML_STRING_MULTILINE_BASIC : TOML_STRING_MULTILINE_LITERAL;
+            kind = quote == '"' ? TOML_STRING_MULTILINE_BASIC : TOML_STRING_MULTILINE_LITERAL;
             pos += 3U;
             continue;
         }
@@ -876,7 +902,8 @@ static int toml_scan_line_strings(const char *data, const toml_line_t *line, int
             return TOML_EDIT_ERR;
         }
     }
-    return TOML_EDIT_OK;
+    *multiline_state = kind | (depth << TOML_ARRAY_DEPTH_SHIFT);
+    return rc;
 }
 
 static int toml_validate_lexical_strings(const char *data, size_t len) {
@@ -888,7 +915,9 @@ static int toml_validate_lexical_strings(const char *data, size_t len) {
             return TOML_EDIT_ERR;
         }
     }
-    return multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+    /* Strings only: open arrays are judged by the header and assignment parsers. */
+    return (multiline_state & TOML_STRING_KIND_MASK) == TOML_STRING_NONE ? TOML_EDIT_OK
+                                                                         : TOML_EDIT_ERR;
 }
 
 static int toml_find_markers(const char *data, size_t len, const char *begin_marker,
@@ -900,7 +929,7 @@ static int toml_find_markers(const char *data, size_t len, const char *begin_mar
     toml_line_t line;
     int multiline_state = TOML_STRING_NONE;
     while (toml_next_line(data, len, &cursor, &line)) {
-        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        int line_in_multiline = (multiline_state & TOML_STRING_KIND_MASK) != TOML_STRING_NONE;
         if (!line_in_multiline && toml_line_equals(data, &line, begin_marker)) {
             ++begin_count;
             *begin_line = line;
@@ -913,7 +942,7 @@ static int toml_find_markers(const char *data, size_t len, const char *begin_mar
             return TOML_EDIT_ERR;
         }
     }
-    if (multiline_state != TOML_STRING_NONE) {
+    if ((multiline_state & TOML_STRING_KIND_MASK) != TOML_STRING_NONE) {
         return TOML_EDIT_ERR;
     }
     if (begin_count == 0 && end_count == 0) {
@@ -1631,6 +1660,7 @@ static int toml_parse_assignment(const char *data, const toml_line_t *line,
     size_t value_end = end;
     quote = '\0';
     escaped = 0;
+    int bracket_depth = 0;
     for (size_t pos = value_start; pos < end; ++pos) {
         char ch = data[pos];
         if (quote) {
@@ -1651,10 +1681,17 @@ static int toml_parse_assignment(const char *data, const toml_line_t *line,
         }
         if (ch == '"' || ch == '\'') {
             quote = ch;
+        } else if (ch == '[') {
+            bracket_depth++;
+        } else if (ch == ']') {
+            bracket_depth--;
         } else if (ch == '#') {
             value_end = pos;
             break;
         }
+    }
+    if (bracket_depth > 0) {
+        assignment->multiline_value = 1;
     }
     toml_trim(data, &value_start, &value_end);
     if (value_start == value_end) {

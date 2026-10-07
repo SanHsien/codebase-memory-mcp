@@ -7300,12 +7300,23 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
                                             break;
                                         }
                                         size_t glen = (size_t)(ep - sp);
-                                        if (smi + (int)glen + 2 < (int)sizeof(sql_map_buf) - 1) {
+                                        /* Escaped as it is copied: the text goes into a JSON
+                                         * string, and a raw quote or backslash broke it. */
+                                        if (smi + (int)glen * 2 + 2 <
+                                            (int)sizeof(sql_map_buf) - 1) {
                                             if (!sql_first) {
                                                 sql_map_buf[smi++] = ' ';
                                             }
-                                            memcpy(sql_map_buf + smi, sp, glen);
-                                            smi += (int)glen;
+                                            for (size_t gi = 0; gi < glen; gi++) {
+                                                char gc = sp[gi];
+                                                if ((unsigned char)gc < 0x20) {
+                                                    continue;
+                                                }
+                                                if (gc == '"' || gc == '\\') {
+                                                    sql_map_buf[smi++] = '\\';
+                                                }
+                                                sql_map_buf[smi++] = gc;
+                                            }
                                             sql_first = false;
                                         }
                                         sp = ep + strlen(sql_end);
@@ -7349,13 +7360,19 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
                                             esc[ei++] = '\\';
                                             esc[ei++] = 'n';
                                             continue;
-                                        } else if (raw[ci] == '\r') {
+                                        } else if (raw[ci] == '\t') {
+                                            esc[ei++] = '\\';
+                                            esc[ei++] = 't';
                                             continue;
+                                        } else if ((unsigned char)raw[ci] < 0x20) {
+                                            continue; /* other controls are not valid in JSON */
                                         }
                                         esc[ei++] = raw[ci];
                                     }
                                     esc[ei] = '\0';
-                                    char props[CBM_SZ_512];
+                                    /* Room for the escaped body plus the wrapper: a 512-byte
+                                     * buffer cut a long body mid-string (invalid JSON). */
+                                    char props[CBM_SZ_512 + 32];
                                     snprintf(props, sizeof(props), "{\"trigger_body\":\"%s\"}",
                                              esc);
                                     mdef.docstring = cbm_arena_strdup(a, props);

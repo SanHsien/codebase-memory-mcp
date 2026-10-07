@@ -23,7 +23,7 @@ enum {
     RN_MIN_SCHEME = 3,
     RN_STRIP_PASSES = 2,
     RN_SCHEME_SKIP = 3,
-    RN_ARGS_SKIP = 7,
+    RN_ARGS_SKIP = 8, /* strlen('"args":[') */
     RN_PROPS_MARGIN = 100,
     RN_CALLEE_SKIP = 14, /* strlen('"callee_args":[') - 1 */
 };
@@ -930,8 +930,10 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         char route_qn[CBM_ROUTE_QN_SIZE];
         snprintf(route_qn, sizeof(route_qn), "__grpc__%s/%s", svc->name, fn->name);
 
-        char props[CBM_SZ_128];
-        snprintf(props, sizeof(props), "{\"source\":\"proto\",\"service\":\"%s\"}", svc->name);
+        char esc_svc[CBM_SZ_512];
+        cbm_json_escape(esc_svc, sizeof(esc_svc), svc->name ? svc->name : "");
+        char props[CBM_SZ_1K];
+        snprintf(props, sizeof(props), "{\"source\":\"proto\",\"service\":\"%s\"}", esc_svc);
 
         int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", fn->name, route_qn, fn->file_path,
                                                 fn->start_line, fn->end_line, props);
@@ -1034,16 +1036,31 @@ static int sveltekit_file_kind(const char *file_path) {
  * route. Group segments wrapped in parentheses are stripped. Dynamic
  * params `[slug]` become `:slug`, and rest params `[...slug]` become
  * `*slug` so the result is recognisable as a path pattern. */
+/* Start of the route tree: just after the SvelteKit `src/routes/` directory. A monorepo
+ * path such as `packages/routes/app/src/routes/x/+server.ts` has an unrelated `routes`
+ * directory first, which used to give the route `/app/src/routes/x`. Without a
+ * `src/routes/` segment the first `/routes/` is used, as before. */
+static const char *sveltekit_routes_start(const char *file_path) {
+    if (strncmp(file_path, "src/routes/", strlen("src/routes/")) == 0) {
+        return file_path + strlen("src/routes/");
+    }
+    const char *src_routes = strstr(file_path, "/src/routes/");
+    if (src_routes) {
+        return src_routes + strlen("/src/routes/");
+    }
+    const char *routes_seg = strstr(file_path, "/routes/");
+    return routes_seg ? routes_seg + strlen("/routes/") : NULL;
+}
+
 static const char *sveltekit_route_path(const char *file_path, char *out, int outsz) {
     if (!file_path || !out || outsz <= 1) {
         return NULL;
     }
-    const char *routes_seg = strstr(file_path, "/routes/");
-    if (!routes_seg) {
+    /* Walk segment-by-segment between the routes directory and the trailing "+...". */
+    const char *p = sveltekit_routes_start(file_path);
+    if (!p) {
         return NULL;
     }
-    /* Walk segment-by-segment between "/routes/" and the trailing "+...". */
-    const char *p = routes_seg + strlen("/routes/");
     const char *last_slash = strrchr(file_path, '/');
     if (!last_slash || last_slash < p) {
         /* File is directly under /routes/ — root route. */
@@ -1201,8 +1218,10 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
                 is_actions = is_var;
             }
         } else if (kind == 3) {
+            /* Distinct from the page load: both files may export `load` for the same
+             * directory, and one shared Route node attached both handlers to the page. */
             if (is_fn && strcmp(child->name, "load") == 0) {
-                method = "LOAD";
+                method = "LAYOUT_LOAD";
             }
         }
         if (!method) {
@@ -1223,10 +1242,14 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         }
         ctx->routes_created++;
 
-        char hprops[CBM_SZ_256];
+        /* The handler QN is a path-derived string: escape it, and size the buffer for the
+         * escaped name so a long QN is not cut mid-string (malformed edge JSON). */
+        char esc_handler[CBM_SZ_1K];
+        cbm_json_escape(esc_handler, sizeof(esc_handler),
+                        child->qualified_name ? child->qualified_name : child->name);
+        char hprops[CBM_SZ_2K];
         snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
-                 child->qualified_name ? child->qualified_name : child->name,
-                 is_actions ? ",\"via\":\"actions_object\"" : "");
+                 esc_handler, is_actions ? ",\"via\":\"actions_object\"" : "");
         cbm_gbuf_insert_edge(ctx->gb, child->id, route_id, "HANDLES", hprops);
         ctx->handles_created++;
     }

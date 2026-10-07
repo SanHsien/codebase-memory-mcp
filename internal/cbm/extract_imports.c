@@ -1414,17 +1414,17 @@ typedef struct {
     TSNode content;
 } CBMEmbeddedBlock;
 
-static void embedded_collect_content_nodes(TSNode root, const CBMEmbeddedLangSpec *spec,
-                                           CBMEmbeddedBlock *out, int *out_count, int max_out) {
-    /* Iterative DFS so deeply-nested script blocks are still found.  Cap the
-     * stack to a sane bound (host grammars do not have million-deep markup
-     * trees) — no need to introduce TSNodeStack here. */
-    enum { EMBED_STACK_CAP = 1024 };
-    TSNode stack[EMBED_STACK_CAP];
-    int top = 0;
-    stack[top++] = root;
-    while (top > 0 && *out_count < max_out) {
-        TSNode node = stack[--top];
+static void embedded_collect_content_nodes(CBMExtractCtx *ctx, TSNode root,
+                                           const CBMEmbeddedLangSpec *spec, CBMEmbeddedBlock *out,
+                                           int *out_count, int max_out) {
+    /* Iterative DFS so deeply-nested script blocks are still found. The stack grows: a
+     * fixed 1024-slot stack stopped pushing when full and dropped the earliest siblings,
+     * so a <script> followed by enough markup was never found. */
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx, 256);
+    ts_nstack_push(&stack, root);
+    while (stack.count > 0 && *out_count < max_out) {
+        TSNode node = ts_nstack_pop(&stack);
         const char *kind = ts_node_type(node);
         if (strcmp(kind, spec->script_node_type) == 0) {
             uint32_t cc = ts_node_child_count(node);
@@ -1442,10 +1442,7 @@ static void embedded_collect_content_nodes(TSNode root, const CBMEmbeddedLangSpe
             /* Do not descend into <script>'s children — content already taken. */
             continue;
         }
-        uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - 1; i >= 0 && top < EMBED_STACK_CAP; i--) {
-            stack[top++] = ts_node_child(node, (uint32_t)i);
-        }
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -1605,10 +1602,16 @@ static void parse_one_embedded_block(CBMExtractCtx *ctx, const CBMEmbeddedBlock 
         .root = ts_tree_root_node(tree),
         .macro_table = ctx->macro_table,
         .return_type_table = ctx->return_type_table,
+        .scratch = ctx->scratch,
+        /* The script block is walked under the same node budget as the file. */
+        .walk_budget_nodes = ctx->walk_budget_nodes,
     };
     cbm_extract_definitions_without_module(&sub_ctx);
     walk_es_imports(&sub_ctx, sub_ctx.root);
     cbm_extract_unified(&sub_ctx);
+    if (sub_ctx.walk_budget_exhausted) {
+        ctx->walk_budget_exhausted = true;
+    }
 
     ts_tree_delete(tree);
     ts_parser_delete(parser);
@@ -1623,7 +1626,7 @@ static void parse_embedded_imports(CBMExtractCtx *ctx) {
         enum { MAX_EMBEDDED_BLOCKS = 16 };
         CBMEmbeddedBlock hits[MAX_EMBEDDED_BLOCKS];
         int hit_count = 0;
-        embedded_collect_content_nodes(ctx->root, e, hits, &hit_count, MAX_EMBEDDED_BLOCKS);
+        embedded_collect_content_nodes(ctx, ctx->root, e, hits, &hit_count, MAX_EMBEDDED_BLOCKS);
         for (int i = 0; i < hit_count; i++) {
             CBMLanguage embedded_language = e->embedded_language;
             if (markup_script_host(ctx->language) &&
