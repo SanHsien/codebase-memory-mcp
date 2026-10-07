@@ -11,6 +11,7 @@
 | `README.md` | 英文 README | 改寫為繁中精簡入口 | 公開入口以繁中為主；原文保留在 `README.en.md` | 把上游新增的產品事實（工具數、語言數、安裝指令）併入本檔，不整份覆蓋 |
 | `README.en.md` | 不存在（原文就是 `README.md`） | 上游 `README.md` 原文，第一行換成語言切換列 | 保留英文原文 | 用上游新版全文覆蓋，再把第一行換回語言切換列 |
 | `.gitignore` | 上游忽略規則 | 尾端加 `# --- fork ---` 區塊：`!CHANGELOG.md` 與本機 gate 產物 | 上游忽略 `CHANGELOG.md`，但本 fork 的 `CHANGELOG.md` 需入版控；gate 會產生 `.venv/` 等檔 | 上游新增規則併在 fork 區塊之上；上游若自己處理同一項，刪掉重複行 |
+| `graph-ui/package-lock.json` | `source-map-js` 1.2.1 | 1.2.2（fork 的 Dependabot PR #1，雜湊已對 npm registry 核對） | 1.2.1 有 high 等級 DoS 弱點（Dependabot 警示 #1） | 上游合併同版本（上游 PR #2557）後採用上游版本並刪本列 |
 | `src/cypher/cypher.c` | WHERE 的 AND/OR/XOR 鏈與 UNION 分支無長度上限；交叉連接只擋 INT_MAX；`expr_binary` 配置未檢查 | AND/OR/XOR 上限 4096、UNION 上限 64；交叉連接中間列數上限 25 萬；配置失敗時釋放左右子樹並回傳 NULL | 數十萬個 AND 使評估遞迴 stack overflow（ASan 實測崩潰）；`MATCH (a) MATCH (b)` 可耗盡記憶體（皆有回歸測試）。OPTIONAL MATCH 的 heap overflow 上游已自己修好（2026-10 同步時採用上游版本）；記憶體不足時 NULL 解參考 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/foundation/compat.h` | Windows `cbm_setenv` 先呼叫 `_putenv_s`，失敗就整個返回 | `_putenv_s` 失敗（ANSI 碼頁無法表示的字元，EILSEQ）不再中止，仍以寬字元 API 設定 | UTF-8 環境變數在非 UTF-8 碼頁的 Windows 上設定失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/ui/http_server.c` | `/api/index` 以截斷後的路徑建索引、回應與 `/api/browse`、日誌輸出未完整跳脫 | 拒絕超過 job slot 的路徑；補跳脫；補一處 doc 洩漏 | 截斷可繞過工作區邊界；Windows 路徑的回應不是合法 JSON | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
