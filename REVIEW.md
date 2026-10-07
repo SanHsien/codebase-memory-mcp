@@ -104,4 +104,5 @@
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 - 抽取器沒有逐行讀完：`extract_defs.c`、`extract_calls.c`、`extract_usages.c`、`extract_unified.c` 大部分只做模式搜尋；各語言 LSP 檔案未審。這些不能視為已排除。
+- `test-impact-artifact` workflow 暫停中，上游修好後恢復（見 [`docs/DECISIONS.md`](docs/DECISIONS.md)）。
 - 上游持續前進：本次同步到 `e71f23e`（2026-10-07，含 133 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-07.md`](docs/records/upstream-triage-2026-10-07.md)。

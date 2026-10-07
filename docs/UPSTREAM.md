@@ -7,6 +7,7 @@
 3. 逐筆判斷後 merge 或 cherry-pick。
 4. `pwsh -NoProfile -File tools\dev_check.ps1`
 5. 記入 [`DECISIONS.md`](DECISIONS.md)，驗證後更新 `tools/upstream_baseline.json`。
+6. 檢查 [`DECISIONS.md`](DECISIONS.md) 中「暫停」的 workflow：上游已修好就恢復並刪除該條。
 
 上游改 `README.md`：整份貼進 `README.en.md`（第一行換回語言切換列），再把產品事實的變動併入繁中 `README.md`。
 
