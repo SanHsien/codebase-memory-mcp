@@ -79,8 +79,21 @@ static const char *literal_from_arg(CBMExtractCtx *ctx, TSNode arg) {
     return unquote_string(ctx->arena, text);
 }
 
+/* True for nodes that merely wrap a string or an argument.  An expression such
+ * as `"user:" + id` also has a string first child, but that child is only a
+ * fragment of the value, so it must never stand in for the whole name. */
+static bool is_string_wrapper_kind(const char *kind) {
+    return strcmp(kind, "string") == 0 || strcmp(kind, "string_literal") == 0 ||
+           strcmp(kind, "interpreted_string_literal") == 0 ||
+           strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "encapsed_string") == 0 ||
+           strcmp(kind, "argument") == 0 || strcmp(kind, "value_argument") == 0;
+}
+
 /* Extract string literal from first named child (for nodes wrapping string content). */
 static const char *literal_from_first_child(CBMExtractCtx *ctx, TSNode node) {
+    if (!is_string_wrapper_kind(ts_node_type(node))) {
+        return NULL;
+    }
     uint32_t nc = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_named_child(node, i);
@@ -258,9 +271,27 @@ static bool js_is_listen_method(const char *name) {
                     strcmp(name, "once") == 0);
 }
 
+/* Receiver text for classification.  Only the segment after the last '.' (or the
+ * exact text "channel") is ever inspected, and every name matched is short, so
+ * copy at most the final CHAN_RECEIVER_TAIL_MAX bytes.  A long call chain
+ * (a.m().m()...) would otherwise cost O(chain length) per call, O(N^2) overall. */
+enum { CHAN_RECEIVER_TAIL_MAX = 256 };
+
+static char *receiver_tail_text(CBMExtractCtx *ctx, TSNode node) {
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    if (end <= start) {
+        return cbm_arena_strdup(ctx->arena, "");
+    }
+    if (end - start > CHAN_RECEIVER_TAIL_MAX) {
+        start = end - CHAN_RECEIVER_TAIL_MAX;
+    }
+    return cbm_arena_strndup(ctx->arena, ctx->source + start, end - start);
+}
+
 /* Classify receiver for Socket.IO / EventEmitter / WebSocket. */
 static const char *js_classify_receiver(CBMExtractCtx *ctx, TSNode object_node) {
-    char *text = cbm_node_text(ctx->arena, object_node, ctx->source);
+    char *text = receiver_tail_text(ctx, object_node);
     if (!text) {
         return NULL;
     }
@@ -390,7 +421,7 @@ static void extract_channels_js(CBMExtractCtx *ctx) {
  * ══════════════════════════════════════════════════════════════════ */
 
 static const char *py_classify_receiver(CBMExtractCtx *ctx, TSNode object_node) {
-    char *text = cbm_node_text(ctx->arena, object_node, ctx->source);
+    char *text = receiver_tail_text(ctx, object_node);
     if (!text) {
         return NULL;
     }

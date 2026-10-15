@@ -122,7 +122,23 @@ static const CBMType *resolve_builtin_type(GoLSPContext *ctx, const char *name) 
 
 // --- go_parse_type_node: AST type node -> CBMType ---
 
+static const CBMType *go_parse_type_node_inner(GoLSPContext *ctx, TSNode node);
+
+/* Depth-guarded entry. Type nodes nest by recursion (pointer/slice/map/chan/
+ * generic arguments), so a pathologically nested type would overflow the native
+ * stack. The counter is walk_depth, shared with the call walk and the
+ * expression evaluator: it is the one per-context recursion budget. Past the
+ * cap the type is UNKNOWN. */
 const CBMType *go_parse_type_node(GoLSPContext *ctx, TSNode node) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return cbm_type_unknown();
+    ctx->walk_depth++;
+    const CBMType *t = go_parse_type_node_inner(ctx, node);
+    ctx->walk_depth--;
+    return t;
+}
+
+static const CBMType *go_parse_type_node_inner(GoLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
         return cbm_type_unknown();
 
@@ -343,7 +359,20 @@ static void go_unify_type(const CBMType *param_type, const CBMType *arg_type,
 
 // --- go_eval_expr_type: recursive expression type evaluator ---
 
+static const CBMType *go_eval_expr_type_inner(GoLSPContext *ctx, TSNode node);
+
+/* Depth-guarded entry; see go_parse_type_node. A long left-leaning binary chain
+ * (`a+a+...+a`) recurses once per operand. */
 const CBMType *go_eval_expr_type(GoLSPContext *ctx, TSNode node) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return cbm_type_unknown();
+    ctx->walk_depth++;
+    const CBMType *t = go_eval_expr_type_inner(ctx, node);
+    ctx->walk_depth--;
+    return t;
+}
+
+static const CBMType *go_eval_expr_type_inner(GoLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
         return cbm_type_unknown();
 
@@ -1519,6 +1548,53 @@ static void go_invalidate_control_flow_aliases(GoLSPContext *ctx, TSNode node, i
     }
 }
 
+/* The single value node a statement's initializer position holds: the node
+ * itself, or the only element of a one-element expression_list. */
+static TSNode go_single_initializer(TSNode value) {
+    if (!ts_node_is_null(value) && strcmp(ts_node_type(value), "expression_list") == 0) {
+        return ts_node_named_child_count(value) == 1 ? ts_node_named_child(value, 0) : (TSNode){0};
+    }
+    return value;
+}
+
+/* True when go_process_statement(stmt) already evaluated the func_literal that
+ * is (or solely fills) `child`. Evaluating a func_literal walks its body with
+ * the closure parameters bound, so the walker must not recurse into `child`
+ * again: for `a1 := func(){ a2 := func(){ ... } }` that second walk made every
+ * nesting level double the work (2^depth). Only the shapes go_process_statement
+ * evaluates are listed; anything else is still walked here. */
+static bool go_closure_walked_by_statement(GoLSPContext *ctx, TSNode stmt, TSNode child) {
+    const char *kind = ts_node_type(stmt);
+    TSNode value = {0};
+    if (strcmp(kind, "short_var_declaration") == 0) {
+        value = ts_node_child_by_field_name(stmt, "right", 5);
+    } else if (strcmp(kind, "var_spec") == 0) {
+        /* The value is only evaluated when no explicit type is declared. */
+        if (!ts_node_is_null(ts_node_child_by_field_name(stmt, "type", 4)))
+            return false;
+        value = ts_node_child_by_field_name(stmt, "value", 5);
+    } else if (strcmp(kind, "assignment_statement") == 0) {
+        /* Only `name = func(){...}` with a single identifier target. */
+        TSNode left = ts_node_child_by_field_name(stmt, "left", 4);
+        TSNode right = ts_node_child_by_field_name(stmt, "right", 5);
+        if (ts_node_is_null(left) || ts_node_is_null(right) ||
+            strcmp(ts_node_type(left), "identifier") != 0 ||
+            strcmp(ts_node_type(right), "func_literal") != 0) {
+            return false;
+        }
+        char *name = lsp_node_text(ctx, left);
+        if (!name || strcmp(name, "_") == 0)
+            return false;
+        value = right;
+    } else {
+        return false;
+    }
+    if (ts_node_is_null(value) || !ts_node_eq(value, child))
+        return false;
+    TSNode only = go_single_initializer(value);
+    return !ts_node_is_null(only) && strcmp(ts_node_type(only), "func_literal") == 0;
+}
+
 // --- Walk call expressions and resolve them ---
 
 static void resolve_calls_in_node_inner(GoLSPContext *ctx, TSNode node) {
@@ -1964,7 +2040,9 @@ recurse:;
         TSTreeCursor *cursor = cbm_cursor_acquire(&lease, ctx->walk_depth, node);
         if (ts_tree_cursor_goto_first_child(cursor)) {
             do {
-                resolve_calls_in_node(ctx, ts_tree_cursor_current_node(cursor));
+                TSNode child = ts_tree_cursor_current_node(cursor);
+                if (!go_closure_walked_by_statement(ctx, node, child))
+                    resolve_calls_in_node(ctx, child);
             } while (ts_tree_cursor_goto_next_sibling(cursor));
         }
         cbm_cursor_release(&lease);

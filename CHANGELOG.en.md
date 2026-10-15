@@ -12,3 +12,4 @@ Fork maintenance changes only; for product changes see upstream releases.
 - Fixes for Windows-relevant defects with regression tests (cypher overflow and resource exhaustion, watcher on non-ASCII paths and unplugged drives, `cbm_setenv`, `cbm_readdir`, HTTP UI, like hints, installer verification, and more); see `REVIEW.md`.
 - Second review pass: store, route data flows, extractors, TOML multi-line arrays, file-size cap, allocation checks; see `REVIEW.md`.
 - Synced upstream to `e71f23e` (2026-10-07) with an incremental triage record of new PRs/issues.
+- Third review pass (extractors and every language LSP): fixes for 58 reproduced hangs, crashes and wrong results; see `REVIEW.md`.

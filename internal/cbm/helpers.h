@@ -44,6 +44,11 @@ const char *cbm_enclosing_func_qn(CBMArena *a, TSNode node, CBMLanguage lang, co
 // Cached version: uses ctx->ef_cache to avoid repeated parent-chain walks.
 const char *cbm_enclosing_func_qn_cached(CBMExtractCtx *ctx, TSNode node);
 
+/* Elixir (defined in extract_defs.c): unwrap `head when guard`, and the module
+ * name a defmodule / defprotocol / defimpl defines. */
+TSNode cbm_elixir_unwrap_guard(TSNode head, const char *source);
+const char *cbm_elixir_module_name(CBMExtractCtx *ctx, TSNode call, bool is_impl);
+
 // Max declarator-chain descent depth for C/C++/CUDA/GLSL function-name
 // resolution. Single source of truth — extract_defs.c's DECLARATOR_DEPTH_LIMIT
 // is derived from this so the three extractors cannot drift.

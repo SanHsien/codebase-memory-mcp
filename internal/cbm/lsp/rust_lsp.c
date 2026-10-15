@@ -771,8 +771,19 @@ static const char *resolve_path_to_type_qn(RustLSPContext *ctx, const char *path
     return qn; /* may not be registered yet but caller can still wrap as NAMED */
 }
 
+/* Hostile input can nest types thousands of levels deep (`Vec<Vec<...>>`). Both type parsers
+ * recurse once per level, so they stop at this depth and yield an unknown type instead of
+ * exhausting the native stack or doing quadratic text copies. */
+#define RUST_TYPE_MAX_DEPTH 64
+
+static const CBMType *rust_parse_type_node_d(int depth, RustLSPContext *ctx, TSNode node);
+
 const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node)) {
+    return rust_parse_type_node_d(0, ctx, node);
+}
+
+static const CBMType *rust_parse_type_node_d(int depth, RustLSPContext *ctx, TSNode node) {
+    if (ts_node_is_null(node) || depth > RUST_TYPE_MAX_DEPTH) {
         return cbm_type_unknown();
     }
     const char *kind = ts_node_type(node);
@@ -821,7 +832,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
                 inner = ts_node_named_child(node, nc - 1);
             }
         }
-        const CBMType *elem = rust_parse_type_node(ctx, inner);
+        const CBMType *elem = rust_parse_type_node_d(depth + 1, ctx, inner);
         return cbm_type_reference(ctx->arena, elem);
     }
 
@@ -834,7 +845,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
                 inner = ts_node_named_child(node, nc - 1);
             }
         }
-        return cbm_type_pointer(ctx->arena, rust_parse_type_node(ctx, inner));
+        return cbm_type_pointer(ctx->arena, rust_parse_type_node_d(depth + 1, ctx, inner));
     }
 
     /* array_type: [T; N] — treated as slice T */
@@ -846,7 +857,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
         if (ts_node_is_null(elem) && ts_node_named_child_count(node) > 0) {
             elem = ts_node_named_child(node, 0);
         }
-        return cbm_type_slice(ctx->arena, rust_parse_type_node(ctx, elem));
+        return cbm_type_slice(ctx->arena, rust_parse_type_node_d(depth + 1, ctx, elem));
     }
 
     /* slice_type: [T] */
@@ -855,7 +866,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
         if (ts_node_is_null(elem) && ts_node_named_child_count(node) > 0) {
             elem = ts_node_named_child(node, 0);
         }
-        return cbm_type_slice(ctx->arena, rust_parse_type_node(ctx, elem));
+        return cbm_type_slice(ctx->arena, rust_parse_type_node_d(depth + 1, ctx, elem));
     }
 
     /* tuple_type: (T1, T2, …) */
@@ -864,7 +875,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
         int count = 0;
         uint32_t nc = ts_node_named_child_count(node);
         for (uint32_t i = 0; i < nc && count < 16; i++) {
-            elems[count++] = rust_parse_type_node(ctx, ts_node_named_child(node, i));
+            elems[count++] = rust_parse_type_node_d(depth + 1, ctx, ts_node_named_child(node, i));
         }
         if (count == 0) {
             return cbm_type_builtin(ctx->arena, "()");
@@ -910,7 +921,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
                 if (strcmp(tk, "lifetime") == 0) {
                     continue;
                 }
-                targs[targ_count++] = rust_parse_type_node(ctx, tc);
+                targs[targ_count++] = rust_parse_type_node_d(depth + 1, ctx, tc);
             }
         }
         if (targ_count > 0) {
@@ -930,7 +941,7 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
         if (ts_node_is_null(inner) && ts_node_named_child_count(node) > 0) {
             inner = ts_node_named_child(node, 0);
         }
-        return rust_parse_type_node(ctx, inner);
+        return rust_parse_type_node_d(depth + 1, ctx, inner);
     }
 
     /* abstract_type: impl Trait — best-effort same as dyn Trait */
@@ -939,17 +950,17 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
         if (ts_node_is_null(inner) && ts_node_named_child_count(node) > 0) {
             inner = ts_node_named_child(node, 0);
         }
-        return rust_parse_type_node(ctx, inner);
+        return rust_parse_type_node_d(depth + 1, ctx, inner);
     }
 
     /* bounded_type: T + Trait + 'a — take the first child */
     if (strcmp(kind, "bounded_type") == 0 && ts_node_named_child_count(node) > 0) {
-        return rust_parse_type_node(ctx, ts_node_named_child(node, 0));
+        return rust_parse_type_node_d(depth + 1, ctx, ts_node_named_child(node, 0));
     }
 
     /* parenthesized_type or wrapped types */
     if (strcmp(kind, "parenthesized_type") == 0 && ts_node_named_child_count(node) > 0) {
-        return rust_parse_type_node(ctx, ts_node_named_child(node, 0));
+        return rust_parse_type_node_d(depth + 1, ctx, ts_node_named_child(node, 0));
     }
 
     /* qualified_type: <T as Trait>::Item */
@@ -969,9 +980,9 @@ const CBMType *rust_parse_type_node(RustLSPContext *ctx, TSNode node) {
  * area that tree-sitter would produce in `rust_parse_type_node` but
  * without a parser. This is the same trade-off `cbm_rust_parse_return_type_text`
  * makes for Go. */
-static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *text,
-                                                  const char *module_qn, const char **type_params) {
-    if (!text || !text[0]) {
+static const CBMType *parse_type_text_depth(int depth, CBMArena *arena, const char *text,
+                                            const char *module_qn, const char **type_params) {
+    if (!text || !text[0] || depth > RUST_TYPE_MAX_DEPTH) {
         return cbm_type_unknown();
     }
     /* Skip leading whitespace + lifetime + mut markers. */
@@ -984,12 +995,12 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
      * dropping it leaves the rest of the type untouched. */
     if (strncmp(text, "for<", 4) == 0) {
         const char *p = text + 4;
-        int depth = 1;
-        while (*p && depth > 0) {
+        int nest = 1;
+        while (*p && nest > 0) {
             if (*p == '<')
-                depth++;
+                nest++;
             else if (*p == '>')
-                depth--;
+                nest--;
             p++;
         }
         while (*p == ' ')
@@ -1028,7 +1039,7 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
         if (strncmp(p, "mut ", 4) == 0) {
             p += 4;
         }
-        const CBMType *elem = parse_type_text_with_params(arena, p, module_qn, type_params);
+        const CBMType *elem = parse_type_text_depth(depth + 1, arena, p, module_qn, type_params);
         return cbm_type_reference(arena, elem);
     }
 
@@ -1041,7 +1052,7 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
             p += 4;
         }
         return cbm_type_pointer(arena,
-                                parse_type_text_with_params(arena, p, module_qn, type_params));
+                                parse_type_text_depth(depth + 1, arena, p, module_qn, type_params));
     }
 
     /* Slice: [T] */
@@ -1060,8 +1071,8 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
                 *q-- = '\0';
             }
         }
-        return cbm_type_slice(arena,
-                              parse_type_text_with_params(arena, inner, module_qn, type_params));
+        return cbm_type_slice(
+            arena, parse_type_text_depth(depth + 1, arena, inner, module_qn, type_params));
     }
 
     /* Unit / never */
@@ -1078,32 +1089,32 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
         size_t inner_len = strlen(text) - 2;
         char *inner = cbm_arena_strndup(arena, p, inner_len);
         /* Detect comma at top level. */
-        int depth = 0;
+        int nest = 0;
         bool has_comma = false;
         for (char *q = inner; *q; q++) {
             if (*q == '<' || *q == '(' || *q == '[')
-                depth++;
+                nest++;
             else if (*q == '>' || *q == ')' || *q == ']')
-                depth--;
-            else if (*q == ',' && depth == 0) {
+                nest--;
+            else if (*q == ',' && nest == 0) {
                 has_comma = true;
                 break;
             }
         }
         if (!has_comma) {
-            return parse_type_text_with_params(arena, inner, module_qn, type_params);
+            return parse_type_text_depth(depth + 1, arena, inner, module_qn, type_params);
         }
         /* Split by top-level commas. */
         const CBMType *elems[16];
         int count = 0;
         char *start = inner;
-        depth = 0;
+        nest = 0;
         for (char *q = inner;; q++) {
             if (*q == '<' || *q == '(' || *q == '[')
-                depth++;
+                nest++;
             else if (*q == '>' || *q == ')' || *q == ']')
-                depth--;
-            if ((*q == ',' && depth == 0) || *q == '\0') {
+                nest--;
+            if ((*q == ',' && nest == 0) || *q == '\0') {
                 char save = *q;
                 *q = '\0';
                 /* Trim. */
@@ -1111,7 +1122,7 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
                     start++;
                 if (count < 15 && *start) {
                     elems[count++] =
-                        parse_type_text_with_params(arena, start, module_qn, type_params);
+                        parse_type_text_depth(depth + 1, arena, start, module_qn, type_params);
                 }
                 if (save == '\0')
                     break;
@@ -1138,14 +1149,14 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
             char *abuf = cbm_arena_strndup(arena, args, args_len);
             const CBMType *targs[16];
             int targ_count = 0;
-            int depth = 0;
+            int nest = 0;
             char *start = abuf;
             for (char *q = abuf;; q++) {
                 if (*q == '<' || *q == '(' || *q == '[')
-                    depth++;
+                    nest++;
                 else if (*q == '>' || *q == ')' || *q == ']')
-                    depth--;
-                if ((*q == ',' && depth == 0) || *q == '\0') {
+                    nest--;
+                if ((*q == ',' && nest == 0) || *q == '\0') {
                     char save = *q;
                     *q = '\0';
                     while (*start == ' ')
@@ -1153,7 +1164,7 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
                     /* Skip lifetime args. */
                     if (*start != '\'' && *start && targ_count < 15) {
                         targs[targ_count++] =
-                            parse_type_text_with_params(arena, start, module_qn, type_params);
+                            parse_type_text_depth(depth + 1, arena, start, module_qn, type_params);
                     }
                     if (save == '\0')
                         break;
@@ -1194,6 +1205,11 @@ static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *t
         return cbm_type_named(arena, text);
     }
     return cbm_type_named(arena, cbm_arena_sprintf(arena, "%s.%s", module_qn, text));
+}
+
+static const CBMType *parse_type_text_with_params(CBMArena *arena, const char *text,
+                                                  const char *module_qn, const char **type_params) {
+    return parse_type_text_depth(0, arena, text, module_qn, type_params);
 }
 
 /* Public-ish helper used by the cross-file path. */
@@ -5261,7 +5277,19 @@ static void rust_process_impl(RustLSPContext *ctx, TSNode impl_node) {
         if (tt)
             effective_recv = rust_resolve_path_expr(ctx, tt);
     } else {
-        effective_recv = rust_resolve_path_expr(ctx, type_text);
+        /* `impl<'a> Parser<'a>`: the receiver is `Parser`. Strip generic and
+         * lifetime arguments at the first '<', as the extractor does, so the
+         * method QNs match the registered ones. */
+        char *bare_type = cbm_arena_strdup(ctx->arena, type_text);
+        char *lt = bare_type ? strchr(bare_type, '<') : NULL;
+        if (lt) {
+            *lt = ' ';
+            size_t bl = strlen(bare_type);
+            while (bl > 0 && isspace((unsigned char)bare_type[bl - 1]))
+                bare_type[--bl] = ' ';
+        }
+        effective_recv =
+            rust_resolve_path_expr(ctx, bare_type && bare_type[0] ? bare_type : type_text);
     }
     if (!effective_recv)
         return;
@@ -6001,6 +6029,17 @@ void cbm_rust_build_local_registry(CBMArena *arena, CBMTypeRegistry *reg, CBMFil
             char *type_name = cbm_node_text(arena, type_node, source);
             if (!type_name || !type_name[0])
                 continue;
+            /* Strip generics/lifetimes at the first '<' (`Parser<'a>` -> `Parser`),
+             * matching the extractor's receiver QN. */
+            char *type_lt = strchr(type_name, '<');
+            if (type_lt) {
+                *type_lt = ' ';
+                size_t tl = strlen(type_name);
+                while (tl > 0 && isspace((unsigned char)type_name[tl - 1]))
+                    type_name[--tl] = ' ';
+                if (!type_name[0])
+                    continue;
+            }
             const char *type_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, type_name);
 
             RustLSPContext tmp;
@@ -6135,9 +6174,8 @@ extern const TSLanguage *tree_sitter_rust(void);
  * `module_qn` is ONLY the fallback used to qualify a def's return type when that def
  * carries no def_module_qn; pass NULL for the shared build (all_defs always carry
  * def_module_qn — verified: 0 NULL across the C + Rust kernel corpora). */
-static void rust_populate_cross_registry(CBMTypeRegistry *reg, CBMArena *arena,
-                                         CBMRustLSPDef *defs, int def_count,
-                                         const char *module_qn) {
+static void rust_populate_cross_registry(CBMTypeRegistry *reg, CBMArena *arena, CBMRustLSPDef *defs,
+                                         int def_count, const char *module_qn) {
     cbm_registry_init(reg, arena);
     cbm_rust_stdlib_register(reg, arena);
 

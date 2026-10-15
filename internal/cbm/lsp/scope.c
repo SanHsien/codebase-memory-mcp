@@ -33,6 +33,55 @@ static CBMScopeChunk* alloc_chunk(CBMScope* scope) {
     return c;
 }
 
+static void scope_index_insert(const CBMVarBinding **table, int cap, const CBMVarBinding *b,
+                               uint32_t hash) {
+    uint32_t mask = (uint32_t)cap - 1U;
+    uint32_t i = hash & mask;
+    while (table[i]) {
+        i = (i + 1U) & mask;
+    }
+    table[i] = b;
+}
+
+/* Rebuild the index at new_cap slots from the chunks. Keeps the old index (and
+ * returns false) when the allocation fails. */
+static bool scope_index_rebuild(CBMScope *scope, int new_cap) {
+    const CBMVarBinding **table =
+        (const CBMVarBinding **)cbm_arena_alloc(scope->arena, (size_t)new_cap * sizeof(*table));
+    if (!table) {
+        return false;
+    }
+    memset((void *)table, 0, (size_t)new_cap * sizeof(*table));
+    for (const CBMScopeChunk *c = scope->chunks; c != NULL; c = c->next) {
+        for (int i = 0; i < c->used; i++) {
+            scope_index_insert(table, new_cap, &c->bindings[i],
+                               cbm_scope_name_hash(c->bindings[i].name));
+        }
+    }
+    scope->index = table;
+    scope->index_cap = new_cap;
+    return true;
+}
+
+/* Record a binding just appended to the chunks in the name index, creating or
+ * growing the index as the scope fills. Load stays at or below one half. */
+static void scope_index_add(CBMScope *scope, const CBMVarBinding *b, uint32_t hash) {
+    if (scope->index_failed || scope->count <= CBM_SCOPE_INDEX_MIN_BINDINGS) {
+        return;
+    }
+    if (!scope->index || scope->count * 2 > scope->index_cap) {
+        int new_cap = scope->index_cap > 0 ? scope->index_cap * 2 : 128;
+        if (new_cap <= scope->index_cap || !scope_index_rebuild(scope, new_cap)) {
+            /* Without a complete index every reader must scan the chunks. */
+            scope->index = NULL;
+            scope->index_cap = 0;
+            scope->index_failed = true;
+        }
+        return; /* a rebuild already covers b: it is in the chunks */
+    }
+    scope_index_insert(scope->index, scope->index_cap, b, hash);
+}
+
 /* Returns false when the binding could NOT be recorded in THIS frame.
  *
  * The failure that matters is arena exhaustion in alloc_chunk: the old void
@@ -47,14 +96,12 @@ static bool cbm_scope_bind_value(CBMScope *scope, const char *name, const CBMTyp
     if (!scope || !name) {
         return false;
     }
-    for (CBMScopeChunk* c = scope->chunks; c != NULL; c = c->next) {
-        for (int i = 0; i < c->used; i++) {
-            if (c->bindings[i].name && strcmp(c->bindings[i].name, name) == 0) {
-                c->bindings[i].type = type;
-                c->bindings[i].callable_qn = callable_qn;
-                return true;
-            }
-        }
+    uint32_t hash = cbm_scope_name_hash(name);
+    CBMVarBinding *existing = cbm_scope_find_local(scope, name, hash);
+    if (existing) {
+        existing->type = type;
+        existing->callable_qn = callable_qn;
+        return true;
     }
     CBMScopeChunk* head = scope->chunks;
     if (!head || head->used >= CBM_SCOPE_CHUNK_BINDINGS) {
@@ -63,10 +110,13 @@ static bool cbm_scope_bind_value(CBMScope *scope, const char *name, const CBMTyp
             return false; /* arena exhausted: the shadow did NOT take effect */
         }
     }
-    head->bindings[head->used].name = name;
-    head->bindings[head->used].type = type;
-    head->bindings[head->used].callable_qn = callable_qn;
+    CBMVarBinding *added = &head->bindings[head->used];
+    added->name = name;
+    added->type = type;
+    added->callable_qn = callable_qn;
     head->used++;
+    scope->count++;
+    scope_index_add(scope, added, hash);
     return true;
 }
 
@@ -108,15 +158,10 @@ bool cbm_scope_update_callable(CBMScope *scope, const char *name, const char *ca
     if (!name) {
         return false;
     }
-    for (CBMScope *s = scope; s != NULL; s = s->parent) {
-        for (CBMScopeChunk *c = s->chunks; c != NULL; c = c->next) {
-            for (int i = 0; i < c->used; i++) {
-                if (c->bindings[i].name && strcmp(c->bindings[i].name, name) == 0) {
-                    c->bindings[i].callable_qn = callable_qn;
-                    return true;
-                }
-            }
-        }
+    CBMVarBinding *binding = (CBMVarBinding *)cbm_scope_lookup_binding(scope, name);
+    if (!binding) {
+        return false;
     }
-    return false;
+    binding->callable_qn = callable_qn;
+    return true;
 }

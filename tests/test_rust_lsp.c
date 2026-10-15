@@ -22,6 +22,7 @@
 #include "lsp/rust_lsp.h"
 #include "pipeline/lsp_resolve.h"
 #include "pipeline/pass_lsp_cross.h"
+#include <foundation/platform.h>
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -6779,6 +6780,162 @@ TEST(rustlsp_followup_b_pathological_no_hang) {
     cbm_free_result(r); PASS();
 }
 
+/* ── Batch G1: pathological type nesting, lifetime-generic impl, rustdoc bounds ── */
+
+#define RUSTLSP_PATHOLOGICAL_BUDGET_MS 20000
+
+TEST(rustlsp_deep_nested_generic_return_type_bounded) {
+    /* Drives the Rust LSP entry point directly (not cbm_extract_file) so the elapsed bound
+     * measures rust_lsp.c's type parsers only: the source's own `-> Vec<Vec<...>>` goes through
+     * rust_parse_type_node, and a def whose return_types holds the same deep text goes through
+     * the text parser. */
+    enum { DEPTH = 30000 };
+    const char *open = "Vec<";
+    const char *close = ">";
+    size_t cap = 64 + (size_t)DEPTH * (strlen(open) + strlen(close));
+    char *deep = (char *)malloc(cap);
+    char *src = (char *)malloc(cap + 128);
+    ASSERT_NOT_NULL(deep);
+    ASSERT_NOT_NULL(src);
+    char *p = deep;
+    for (int i = 0; i < DEPTH; i++) {
+        p += sprintf(p, "%s", open);
+    }
+    p += sprintf(p, "u8");
+    for (int i = 0; i < DEPTH; i++) {
+        p += sprintf(p, "%s", close);
+    }
+    sprintf(src, "fn f() -> %s { todo!() }\nfn run() { let s = util::make(); let _ = s.len(); }\n",
+            deep);
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMRustLSPDef defs[1];
+    memset(defs, 0, sizeof(defs));
+    defs[0].qualified_name = "p.util.make";
+    defs[0].short_name = "make";
+    defs[0].label = "Function";
+    defs[0].def_module_qn = "p.util";
+    defs[0].return_types = deep;
+    const char *imp_n[] = {"util"};
+    const char *imp_q[] = {"p::util"};
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_rust_lsp_cross(&a, src, (int)strlen(src), "p.caller", defs, 1, imp_n, imp_q, 1, NULL,
+                           &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    free(src);
+    free(deep);
+    cbm_arena_destroy(&a);
+    ASSERT_LT(elapsed, RUSTLSP_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
+TEST(rustlsp_impl_lifetime_generic_self_call_attributed) {
+    CBMFileResult *r = extract_rust("struct Parser<'a> { s: &'a str }\n"
+                                    "impl<'a> Parser<'a> {\n"
+                                    "    fn a(&self) { self.b() }\n"
+                                    "    fn b(&self) {}\n"
+                                    "}\n");
+    ASSERT_NOT_NULL(r);
+    int idx = require_resolved(r, "Parser.a", "Parser.b");
+    ASSERT_GTE(idx, 0);
+    ASSERT_EQ(count_resolved(r, "a.rs", "Parser.b"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+static const char *rustlsp_rustdoc_fn_json(const char *path_elem, char *buf, size_t buf_sz,
+                                           const char *output_json) {
+    snprintf(buf, buf_sz,
+             "{\"index\":{\"0:1\":{\"name\":\"hello\",\"inner\":{\"function\":"
+             "{\"decl\":{\"output\":%s}}}}},"
+             "\"paths\":{\"0:1\":{\"path\":[\"my_crate\",\"%s\"],\"kind\":\"function\"}}}",
+             output_json, path_elem);
+    return buf;
+}
+
+TEST(rustlsp_rustdoc_long_path_element_no_overread) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    char elem[1801];
+    memset(elem, 'x', sizeof(elem) - 1);
+    elem[sizeof(elem) - 1] = '\0';
+    char *json = (char *)malloc(4096);
+    ASSERT_NOT_NULL(json);
+    rustlsp_rustdoc_fn_json(elem, json, 4096, "{\"primitive\":\"i32\"}");
+    int n = cbm_rust_rustdoc_ingest(&reg, &a, json, (int)strlen(json), "my_crate");
+    free(json);
+    /* Either the full QN is registered or the item is skipped, but the join
+     * must never read past its stack buffer (ASan) nor register a truncated or
+     * garbage QN. */
+    if (n >= 1) {
+        char *qn = (char *)malloc(sizeof("my_crate.") + sizeof(elem));
+        ASSERT_NOT_NULL(qn);
+        snprintf(qn, sizeof("my_crate.") + sizeof(elem), "my_crate.%s", elem);
+        const CBMRegisteredFunc *f = cbm_registry_lookup_func(&reg, qn);
+        free(qn);
+        ASSERT_NOT_NULL(f);
+    }
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(rustlsp_rustdoc_long_crate_qn_no_overflow) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    char crate_qn[2001];
+    memset(crate_qn, 'c', sizeof(crate_qn) - 1);
+    crate_qn[sizeof(crate_qn) - 1] = '\0';
+    char *json = (char *)malloc(4096);
+    ASSERT_NOT_NULL(json);
+    rustlsp_rustdoc_fn_json("hello", json, 4096, "{\"primitive\":\"i32\"}");
+    (void)cbm_rust_rustdoc_ingest(&reg, &a, json, (int)strlen(json), crate_qn);
+    free(json);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(rustlsp_rustdoc_deep_nested_type_bounded) {
+    enum { DEPTH = 200000 };
+    const char *open = "{\"borrowed_ref\":{\"type\":";
+    const char *close = "}}";
+    const char *leaf = "{\"primitive\":\"i32\"}";
+    size_t cap = strlen(leaf) + (size_t)DEPTH * (strlen(open) + strlen(close)) + 1;
+    char *out = (char *)malloc(cap);
+    ASSERT_NOT_NULL(out);
+    char *p = out;
+    for (int i = 0; i < DEPTH; i++) {
+        p += sprintf(p, "%s", open);
+    }
+    p += sprintf(p, "%s", leaf);
+    for (int i = 0; i < DEPTH; i++) {
+        p += sprintf(p, "%s", close);
+    }
+    size_t jcap = cap + 512;
+    char *json = (char *)malloc(jcap);
+    ASSERT_NOT_NULL(json);
+    rustlsp_rustdoc_fn_json("hello", json, jcap, out);
+    free(out);
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &a);
+    uint64_t t0 = cbm_now_ms();
+    int n = cbm_rust_rustdoc_ingest(&reg, &a, json, (int)strlen(json), "my_crate");
+    uint64_t elapsed = cbm_now_ms() - t0;
+    free(json);
+    ASSERT_GTE(n, 1);
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(&reg, "my_crate.hello"));
+    cbm_arena_destroy(&a);
+    ASSERT_LT(elapsed, RUSTLSP_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
 void suite_rust_lsp(void) {
     /* Free function dispatch */
     RUN_TEST(rustlsp_free_function_call);
@@ -7398,4 +7555,11 @@ void suite_rust_lsp(void) {
 
     /* FOLLOWUP B: eval-step hardening */
     RUN_TEST(rustlsp_followup_b_pathological_no_hang);
+
+    /* Batch G1: pathological nesting, lifetime-generic impl, rustdoc bounds */
+    RUN_TEST(rustlsp_impl_lifetime_generic_self_call_attributed);
+    RUN_TEST(rustlsp_rustdoc_long_path_element_no_overread);
+    RUN_TEST(rustlsp_rustdoc_long_crate_qn_no_overflow);
+    RUN_TEST(rustlsp_rustdoc_deep_nested_type_bounded);
+    RUN_TEST(rustlsp_deep_nested_generic_return_type_bounded);
 }

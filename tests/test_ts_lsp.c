@@ -24,6 +24,7 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "../src/foundation/compat.h"
+#include "../src/foundation/platform.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/ts_lsp.h"
 
@@ -4752,6 +4753,229 @@ TEST(tslsp_walk_depth_cap_skips_pathologically_nested_calls) {
     PASS();
 }
 
+/* ── Batch F regressions ───────────────────────────────────────────────────── */
+
+/* F1: parse_ts_type_text recursed once per generic nesting level with no depth
+ * cap. The work budget only stops the call that exhausts it (the counter then
+ * reads negative, which the guard treats as "unarmed"), so later declarations
+ * of a 17000-level `Array<` nest were parsed in full: quadratic copying and a
+ * 17000-frame recursion each. Several declarations make the unbudgeted tail
+ * dominate. */
+TEST(tslsp_deeply_nested_generic_type_text_is_capped) {
+    enum { DEPTH = 17000, DECLS = 6 };
+    size_t cap = 64 + (size_t)DECLS * ((size_t)DEPTH * 7 + 32);
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t n = 0;
+    for (int d = 0; d < DECLS; d++) {
+        n += (size_t)snprintf(src + n, cap - n, "let x%d: ", d);
+        for (int i = 0; i < DEPTH; i++)
+            n += (size_t)snprintf(src + n, cap - n, "Array<");
+        n += (size_t)snprintf(src + n, cap - n, "number");
+        for (int i = 0; i < DEPTH; i++)
+            n += (size_t)snprintf(src + n, cap - n, ">");
+        n += (size_t)snprintf(src + n, cap - n, ";\n");
+    }
+    /* Drive the LSP entry point directly: the full cbm_extract_file path also
+     * runs the definition/usage extractors, whose own cost on a 17000-deep
+     * nest is outside ts_lsp.c (it is the same with CBM_LSP_DISABLED=1). */
+    CBMArena reg_arena;
+    cbm_arena_init(&reg_arena);
+    CBMTypeRegistry *reg = cbm_ts_build_cross_registry(&reg_arena, NULL, 0);
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_ts_lsp_cross_with_registry(&arena, src, (int)strlen(src), "test.main", false, false,
+                                       false, reg, NULL, 0, NULL, NULL, 0, NULL, &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    free(src);
+    cbm_arena_destroy(&arena);
+    cbm_arena_destroy(&reg_arena);
+    ASSERT_NOT_NULL(reg);
+    ASSERT_LT((long)elapsed, 20000);
+    PASS();
+}
+
+/* F2: infer_implicit_returns evaluates bodies before parameters are bound and
+ * memoized UNKNOWN for `r`, so the main pass never typed `r.run()`. */
+TEST(tslsp_implicit_return_inference_does_not_poison_main_pass) {
+    CBMFileResult *r = extract_ts("class Repo { run() { return 1; } }\n"
+                                  "function f(r: Repo) { return r.run(); }\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, ".f", "Repo.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* F3: every binary expression was typed `number` (or string), so `a ?? new C()`
+ * lost the class and `.run()` on the result never resolved. */
+TEST(tslsp_logical_binary_expressions_keep_operand_types) {
+    CBMFileResult *r = extract_ts("class Service { run(): void {} }\n"
+                                  "function viaNullish(cached: Service | undefined): void {\n"
+                                  "    const s = cached ?? new Service();\n"
+                                  "    s.run();\n"
+                                  "}\n"
+                                  "function viaOr(cached: Service | undefined): void {\n"
+                                  "    const s = cached || new Service();\n"
+                                  "    s.run();\n"
+                                  "}\n"
+                                  "function viaAnd(ok: boolean): void {\n"
+                                  "    const s = ok && new Service();\n"
+                                  "    s.run();\n"
+                                  "}\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "viaNullish", "Service.run"), 0);
+    ASSERT_GTE(require_resolved(r, "viaOr", "Service.run"), 0);
+    ASSERT_GTE(require_resolved(r, "viaAnd", "Service.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* F4: Array.reduce's callback was registered as (x: T) => U, so the
+ * accumulator was bound to the element type instead of U (initial value). */
+TEST(tslsp_reduce_accumulator_is_not_element_type) {
+    CBMFileResult *r = extract_ts("class Item { merge(o: Item): void {} }\n"
+                                  "class Acc { merge(i: Item): Acc { return this; } }\n"
+                                  "function f(items: Item[]): void {\n"
+                                  "    items.reduce((acc, it) => acc.merge(it), new Acc());\n"
+                                  "}\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT(find_resolved(r, ".f", "Item.merge"), 0);
+    ASSERT_GTE(require_resolved(r, ".f", "Acc.merge"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* F5: a TS return-type text `User | undefined` was split on '|' into two
+ * "returns" (a tuple), so `find()!.save()` never resolved cross-file. */
+TEST(tslsp_crossfile_union_return_text_is_not_split_into_tuple) {
+    const char *source = "import { find, load } from './a';\n"
+                         "function go() { find()!.save(); }\n"
+                         "async function go2() { (await load())!.save(); }\n";
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.main.go",
+         .short_name = "go",
+         .label = "Function",
+         .def_module_qn = "test.main"},
+        {.qualified_name = "test.main.go2",
+         .short_name = "go2",
+         .label = "Function",
+         .def_module_qn = "test.main"},
+        {.qualified_name = "test.a.User",
+         .short_name = "User",
+         .label = "Class",
+         .def_module_qn = "test.a"},
+        {.qualified_name = "test.a.User.save",
+         .short_name = "save",
+         .label = "Method",
+         .def_module_qn = "test.a",
+         .receiver_type = "test.a.User"},
+        {.qualified_name = "test.a.find",
+         .short_name = "find",
+         .label = "Function",
+         .def_module_qn = "test.a",
+         .return_types = "User | undefined"},
+        {.qualified_name = "test.a.load",
+         .short_name = "load",
+         .label = "Function",
+         .def_module_qn = "test.a",
+         .return_types = "Promise<User | undefined>"},
+    };
+    const char *imp_names[] = {"find", "load"};
+    const char *imp_qns[] = {"test.a", "test.a"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    cbm_run_ts_lsp_cross(&arena, source, (int)strlen(source), "test.main", false, false, false,
+                         defs, 6, imp_names, imp_qns, 2, NULL, &out);
+    int go_save = find_resolved_arr(&out, ".go", "User.save");
+    int go2_save = find_resolved_arr(&out, ".go2", "User.save");
+    cbm_arena_destroy(&arena);
+    ASSERT_GTE(go_save, 0);
+    ASSERT_GTE(go2_save, 0);
+    PASS();
+}
+
+/* F6: contextual callback params were looked up past the NULL terminator of
+ * the expected (x: T) => U param array when the arrow declares more params
+ * than the registered callback (map's (x, i, a)). ASan reports the stray read. */
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#define TSLSP_TEST_ASAN 1
+void __asan_poison_memory_region(void const volatile *addr, size_t size);
+void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+#endif
+
+/* The arena is a bump allocator, so a read just past the callback's param array
+ * lands in the next object and no sanitizer notices. Sweep the first block's
+ * size so that, for one size, the substituted callback param array ends exactly
+ * at the block end, and poison the bytes past it: an unfixed read of
+ * param_types[2] then trips ASan (use-after-poison). Without ASan the sweep
+ * still exercises the path. */
+TEST(tslsp_callback_extra_params_do_not_read_past_expected) {
+    const char *src = "function f(arr: string[]): void {\n"
+                      "    arr.map((x, i, a) => a.length);\n"
+                      "}\n";
+    CBMArena reg_arena;
+    cbm_arena_init(&reg_arena);
+    CBMTypeRegistry *reg = cbm_ts_build_cross_registry(&reg_arena, NULL, 0);
+    ASSERT_NOT_NULL(reg);
+
+    /* Measure how much the file pass allocates in one big block. */
+    CBMArena probe;
+    cbm_arena_init_exact(&probe, (size_t)1 << 20);
+    CBMResolvedCallArray probe_out = {0};
+    cbm_run_ts_lsp_cross_with_registry(&probe, src, (int)strlen(src), "test.main", false, false,
+                                       false, reg, NULL, 0, NULL, NULL, 0, NULL, &probe_out);
+    size_t span = probe.used + 64;
+    cbm_arena_destroy(&probe);
+    ASSERT_GT((long)span, 64);
+
+    enum { REDZONE = 64 };
+    for (size_t n = 64; n <= span; n += 8) {
+        CBMArena a;
+        cbm_arena_init_exact(&a, n + REDZONE);
+        a.block_size = n; /* arena grows at n; the bytes beyond are ours to poison */
+#ifdef TSLSP_TEST_ASAN
+        __asan_poison_memory_region(a.blocks[0] + n, REDZONE);
+#endif
+        CBMResolvedCallArray out = {0};
+        cbm_run_ts_lsp_cross_with_registry(&a, src, (int)strlen(src), "test.main", false, false,
+                                           false, reg, NULL, 0, NULL, NULL, 0, NULL, &out);
+#ifdef TSLSP_TEST_ASAN
+        __asan_unpoison_memory_region(a.blocks[0] + n, REDZONE);
+#endif
+        cbm_arena_destroy(&a);
+    }
+    cbm_arena_destroy(&reg_arena);
+    PASS();
+}
+
+/* F7: union flattening capped the flat buffer at count*2+4 entries, so a union
+ * of two large unions silently lost members. */
+TEST(tslsp_union_flatten_keeps_members_of_large_nested_unions) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    const CBMType *left[10];
+    const CBMType *right[10];
+    for (int i = 0; i < 10; i++) {
+        left[i] = cbm_type_named(&arena, cbm_arena_sprintf(&arena, "test.L%d", i));
+        right[i] = cbm_type_named(&arena, cbm_arena_sprintf(&arena, "test.R%d", i));
+    }
+    const CBMType *lu = cbm_type_union(&arena, left, 10);
+    const CBMType *ru = cbm_type_union(&arena, right, 10);
+    const CBMType *both[2] = {lu, ru};
+    const CBMType *u = cbm_type_union(&arena, both, 2);
+    int count = (u && u->kind == CBM_TYPE_UNION) ? u->data.union_type.count : -1;
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(count, 20);
+    PASS();
+}
+
 SUITE(ts_lsp) {
     RUN_TEST(tslsp_walk_depth_cap_skips_pathologically_nested_calls);
     /* Smoke (Phase 1) */
@@ -5226,4 +5450,13 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_js_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_ts_ordinary_same_leaf_calls_join_by_exact_site);
     RUN_TEST(tslsp_tsx_ordinary_same_leaf_calls_join_by_exact_site);
+
+    /* Batch F regressions. */
+    RUN_TEST(tslsp_implicit_return_inference_does_not_poison_main_pass);
+    RUN_TEST(tslsp_logical_binary_expressions_keep_operand_types);
+    RUN_TEST(tslsp_reduce_accumulator_is_not_element_type);
+    RUN_TEST(tslsp_crossfile_union_return_text_is_not_split_into_tuple);
+    RUN_TEST(tslsp_union_flatten_keeps_members_of_large_nested_unions);
+    RUN_TEST(tslsp_callback_extra_params_do_not_read_past_expected);
+    RUN_TEST(tslsp_deeply_nested_generic_type_text_is_capped);
 }

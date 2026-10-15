@@ -11,6 +11,7 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "foundation/platform.h" /* cbm_now_ms */
 #include "lang_specs.h" /* cbm_ts_language — direct-parse GLR cap regression (#913) */
 
 #include <stdio.h>
@@ -771,6 +772,174 @@ TEST(lsp_kotlin_deep_nesting_no_crash) {
     PASS();
 }
 
+/* ── Batch B: pathological-shape hangs and string-literal fidelity ─────────── */
+
+/* Extract `src` and return elapsed milliseconds (the result is freed). */
+static uint64_t so_timed_extract(const char *src, CBMLanguage lang, const char *path) {
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = cbm_extract_file(src, (int)strlen(src), lang, "so", path, 0, NULL, NULL);
+    uint64_t dt = cbm_now_ms() - t0;
+    if (r) {
+        cbm_free_result(r);
+    }
+    return dt;
+}
+
+/* Return the first_string_arg of the first call whose callee contains `needle`. */
+static const char *so_first_string_arg(CBMFileResult *r, const char *needle) {
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *callee = r->calls.items[i].callee_name;
+        if (callee && strstr(callee, needle)) {
+            return r->calls.items[i].first_string_arg;
+        }
+    }
+    return NULL;
+}
+
+/* B1: Clojure `(defn g [] (f (f ... x)))` -- every call list climbed all of its
+ * ancestors with ts_node_parent (itself O(depth)), so deep nesting was cubic. */
+TEST(clojure_deep_nested_calls_no_hang) {
+    enum { DEPTH = 5000 };
+    size_t sz = (size_t)DEPTH * 6 + 64;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src + snprintf(src, sz, "(defn g [] ");
+    for (int i = 0; i < DEPTH; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "(f ");
+    }
+    p += snprintf(p, sz - (size_t)(p - src), "x");
+    memset(p, ')', (size_t)DEPTH + 1);
+    p[DEPTH + 1] = '\0';
+    uint64_t ms = so_timed_extract(src, CBM_LANG_CLOJURE, "deep.clj");
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* B2: JS `a.m().m()...` -- the callee text of each member call was the whole
+ * receiver chain, O(N^2) memory and time. The chain is sized so the remaining
+ * (scope-stack) cost stays small; the callee-length check is what separates
+ * the fixed extractor from the unfixed one. */
+TEST(js_long_member_chain_no_hang) {
+    enum { CHAIN = 10000 };
+    size_t sz = (size_t)CHAIN * 4 + 16;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    *p++ = 'a';
+    for (int i = 0; i < CHAIN; i++) {
+        memcpy(p, ".m()", 4);
+        p += 4;
+    }
+    *p++ = ';';
+    *p = '\0';
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_JAVASCRIPT, "so", "chain.js", 0, NULL, NULL);
+    uint64_t ms = cbm_now_ms() - t0;
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_GT(r->calls.count, 0);
+    /* No callee name may carry the receiver chain: that is the O(N^2) text. */
+    size_t longest = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *callee = r->calls.items[i].callee_name;
+        size_t len = callee ? strlen(callee) : 0;
+        if (len > longest) {
+            longest = len;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_LT(longest, 1024);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* B3: raw / prefixed / triple-quoted string literals yield the bare path. */
+TEST(go_raw_string_route_path_stripped) {
+    const char *src = "package main\n"
+                      "func main() {\n"
+                      "\tr.GET(`/users`, h)\n"
+                      "\tr.POST(\"/dq\", h)\n"
+                      "}\n";
+    CBMFileResult *r = extract(src, CBM_LANG_GO, "so", "routes.go");
+    ASSERT_NOT_NULL(r);
+    const char *raw = so_first_string_arg(r, "GET");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_STR_EQ("/users", raw);
+    const char *dq = so_first_string_arg(r, "POST");
+    ASSERT_NOT_NULL(dq);
+    ASSERT_STR_EQ("/dq", dq);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(python_prefixed_string_route_path_stripped) {
+    const char *src = "import requests\n"
+                      "def run():\n"
+                      "    requests.get(r\"/raw\")\n"
+                      "    requests.post(f\"/fmt\")\n"
+                      "    requests.put(\"\"\"/tri\"\"\")\n"
+                      "    requests.delete(b'/byt')\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PYTHON, "so", "routes.py");
+    ASSERT_NOT_NULL(r);
+    const char *a = so_first_string_arg(r, "get");
+    ASSERT_NOT_NULL(a);
+    ASSERT_STR_EQ("/raw", a);
+    const char *b = so_first_string_arg(r, "post");
+    ASSERT_NOT_NULL(b);
+    ASSERT_STR_EQ("/fmt", b);
+    const char *c = so_first_string_arg(r, "put");
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ("/tri", c);
+    const char *d = so_first_string_arg(r, "delete");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ("/byt", d);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* B5: `socket.emit("user:" + id, d)` must not record the channel "user:". */
+TEST(js_emit_concat_channel_not_truncated) {
+    const char *src = "function run(id, d) {\n"
+                      "  socket.emit(\"user:\" + id, d);\n"
+                      "  socket.emit(\"ok\", d);\n"
+                      "}\n";
+    CBMFileResult *r = extract(src, CBM_LANG_JAVASCRIPT, "so", "emit.js");
+    ASSERT_NOT_NULL(r);
+    bool saw_ok = false;
+    for (int i = 0; i < r->channels.count; i++) {
+        ASSERT_STR_NEQ("user:", r->channels.items[i].channel_name);
+        if (strcmp(r->channels.items[i].channel_name, "ok") == 0) {
+            saw_ok = true;
+        }
+    }
+    ASSERT_TRUE(saw_ok);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* B6: many bindings of one name followed by many usages scanned every binding
+ * per usage. */
+TEST(go_many_shadow_bindings_no_slowdown) {
+    enum { N = 40000 };
+    size_t sz = (size_t)N * 24 + 64;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src + snprintf(src, sz, "package main\nfunc g() {\n");
+    for (int i = 0; i < N; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "\t_ = x\n");
+    }
+    for (int i = 0; i < N; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "\tx := 1\n");
+    }
+    snprintf(p, sz - (size_t)(p - src), "}\n");
+    uint64_t ms = so_timed_extract(src, CBM_LANG_GO, "shadow.go");
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite registration
  * ═══════════════════════════════════════════════════════════════════ */
@@ -805,6 +974,330 @@ TEST(dbt_deep_jinja_nesting_no_crash) {
     ASSERT_NOT_NULL(src);
     ASSERT_FALSE(so_extract_crashes(src, CBM_LANG_SQL, "models/deep.sql"));
     free(src);
+    PASS();
+}
+
+/* ── Batch U: scope-stack, binding-index and infra-scan costs ─────────────── */
+
+/* U1: every node of a 30000-link `a.m().m()...` chain consulted the whole walk
+ * scope stack (existing lexical scope, innermost lexical scope, enclosing
+ * function), so the walk was quadratic in the nesting depth. */
+TEST(js_member_chain_30000_scope_stack_linear) {
+    enum { CHAIN = 30000 };
+    size_t sz = (size_t)CHAIN * 4 + 16;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    *p++ = 'a';
+    for (int i = 0; i < CHAIN; i++) {
+        memcpy(p, ".m()", 4);
+        p += 4;
+    }
+    *p++ = ';';
+    *p = '\0';
+    uint64_t ms = so_timed_extract(src, CBM_LANG_JAVASCRIPT, "chain30k.js");
+    free(src);
+    printf("    30000-link chain: %llu ms\n", (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* U2: cbm_scope_bind_value scanned every chunk with strcmp, so N unique names
+ * in one scope cost O(N^2). */
+TEST(python_many_unique_names_one_scope_linear) {
+    enum { N = 60000 };
+    size_t sz = (size_t)N * 16 + 16;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    for (int i = 0; i < N; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "x%d = 1\n", i);
+    }
+    uint64_t ms = so_timed_extract(src, CBM_LANG_PYTHON, "names.py");
+    free(src);
+    printf("    %d unique top-level names: %llu ms\n", (int)N, (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* U3a: the infra scan re-walked the whole subtree at every array, so a deeply
+ * nested JSON `[[[...]]]` was quadratic. */
+TEST(json_deep_array_infra_scan_linear) {
+    enum { DEPTH = 30000 };
+    size_t sz = (size_t)DEPTH * 2 + 16;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    memset(src, '[', (size_t)DEPTH);
+    memset(src + DEPTH, ']', (size_t)DEPTH);
+    src[2 * DEPTH] = '\n';
+    src[2 * DEPTH + 1] = '\0';
+    uint64_t ms = so_timed_extract(src, CBM_LANG_JSON, "deep.json");
+    free(src);
+    printf("    JSON %d-deep array: %llu ms\n", (int)DEPTH, (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+static bool so_has_infra_binding(const CBMFileResult *r, const char *source, const char *url) {
+    for (int i = 0; i < r->infra_bindings.count; i++) {
+        const CBMInfraBinding *b = &r->infra_bindings.items[i];
+        if (b->source_name && b->target_url && strcmp(b->source_name, source) == 0 &&
+            strcmp(b->target_url, url) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* U3b: the infra scanner stopped pushing at a fixed 512-frame stack, so a YAML
+ * sequence with more than 512 items lost items. Every item must be bound, and
+ * each exactly once (the old scan emitted a binding per enclosing container). */
+TEST(yaml_infra_sequence_items_exceed_512) {
+    enum { ITEMS = 700 };
+    size_t sz = (size_t)ITEMS * 96 + 64;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    for (int i = 0; i < ITEMS; i++) {
+        p += snprintf(p, sz - (size_t)(p - src),
+                      "- topic: t%d\n  uri: https://svc%d.example.com/hook\n", i, i);
+    }
+    CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "pubsub.yaml");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    bool first = so_has_infra_binding(r, "t0", "https://svc0.example.com/hook");
+    bool last = so_has_infra_binding(r, "t699", "https://svc699.example.com/hook");
+    int total = r->infra_bindings.count;
+    cbm_free_result(r);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(last);
+    ASSERT_EQ(total, ITEMS);
+    PASS();
+}
+
+/* U3c: push_yaml_block_children stopped pushing at 256 frames, so a mapping
+ * with more than 256 nested-map keys dropped the later keys' leaf values. */
+TEST(yaml_nested_map_keys_exceed_256) {
+    enum { KEYS = 400 };
+    size_t sz = (size_t)KEYS * 80 + 64;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    for (int i = 0; i < KEYS; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "k%d:\n  endpoint: https://svc%d.example.com/x\n", i,
+                      i);
+    }
+    CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "many_maps.yaml");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    bool saw_last = false;
+    bool saw_first = false;
+    for (int i = 0; i < r->string_refs.count; i++) {
+        const char *kp = r->string_refs.items[i].key_path;
+        if (kp && strcmp(kp, "k399.endpoint") == 0) {
+            saw_last = true;
+        }
+        if (kp && strcmp(kp, "k0.endpoint") == 0) {
+            saw_first = true;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_TRUE(saw_first);
+    ASSERT_TRUE(saw_last);
+    PASS();
+}
+
+/* ── Batch V: superlinear usage classification and YAML nested walk ───────── */
+
+/* Build `<head>` + `<open>` x depth + `<core>` + `<close>` x depth + `<tail>`. */
+static char *so_nested_wrap(const char *head, const char *open, int depth, const char *core,
+                            const char *close, const char *tail) {
+    size_t sz = strlen(head) + strlen(core) + strlen(tail) +
+                (size_t)depth * (strlen(open) + strlen(close)) + 16;
+    char *src = malloc(sz);
+    if (!src) {
+        return NULL;
+    }
+    char *p = src + snprintf(src, sz, "%s", head);
+    for (int i = 0; i < depth; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "%s", open);
+    }
+    p += snprintf(p, sz - (size_t)(p - src), "%s", core);
+    for (int i = 0; i < depth; i++) {
+        p += snprintf(p, sz - (size_t)(p - src), "%s", close);
+    }
+    snprintf(p, sz - (size_t)(p - src), "%s", tail);
+    return src;
+}
+
+/* V1a: a C++ initializer list nested 8000 deep, `int a[] = {x, {x, ...}};`.
+ * Every `x` was classified by climbing all of its ancestors (a cursor reset plus
+ * one hop per level, ts_node_parent being O(depth) itself), so handle_usages was
+ * superlinear: 57 s at this depth before the fix. The deep `std::vector<`
+ * shape from the same report is covered by the work counter test below -- its
+ * wall time is dominated by the vendored tree-sitter GLR parse, not by usages. */
+TEST(cpp_deep_initializer_list_usages_linear) {
+    char *src = so_nested_wrap("int a[] = ", "{x, ", 8000, "x", "}", ";\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = so_timed_extract(src, CBM_LANG_CPP, "deep_init.cpp");
+    free(src);
+    printf("    C++ 8000-deep {x, ...}: %llu ms\n", (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+#if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
+static uint64_t so_cpp_template_climb_work(int depth) {
+    char *src = so_nested_wrap("using T = ", "std::vector<", depth, "int", "> ", ";\n");
+    if (!src) {
+        return UINT64_MAX;
+    }
+    cbm_usage_field_lookup_test_reset();
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_CPP, "so", "deep_tmpl.cpp", 0, NULL, NULL);
+    uint64_t work = cbm_usage_field_lookup_test_work();
+    free(src);
+    if (!r) {
+        return UINT64_MAX;
+    }
+    cbm_free_result(r);
+    return work;
+}
+#endif
+
+/* V1a (work form): the climb steps taken while classifying `std::vector<...>`
+ * type references must grow with the input, not with its square. A 4x deeper
+ * input costs at most 8x the steps (16x when quadratic). Counts cursor hops, so
+ * it does not depend on the machine or on the vendored parser's speed. */
+TEST(cpp_deep_template_args_usage_work_linear) {
+#if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
+    uint64_t small = so_cpp_template_climb_work(400);
+    uint64_t big = so_cpp_template_climb_work(1600);
+    ASSERT_TRUE(small != UINT64_MAX);
+    ASSERT_TRUE(big != UINT64_MAX);
+    printf("    std::vector< climb work: depth 400 = %llu, depth 1600 = %llu\n",
+           (unsigned long long)small, (unsigned long long)big);
+    ASSERT_LT(big, small * 8 + 256);
+    PASS();
+#else
+    SKIP("climb work counter needs CBM_CALL_REFERENCE_LOOKUP_TEST_API");
+#endif
+}
+
+/* V1b: a Java field `List<List<...>>` nested 4000 deep (16-18 s at 3200). */
+TEST(java_deep_generics_usages_linear) {
+    char *src = so_nested_wrap("class A {\n  ", "List<", 4000, "String", ">", " f;\n}\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = so_timed_extract(src, CBM_LANG_JAVA, "A.java");
+    free(src);
+    printf("    Java 4000-deep List<: %llu ms\n", (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* V1c: a TypeScript `let x: Array<Array<...>>` nested 4000 deep (31.8 s). */
+TEST(ts_deep_generics_usages_linear) {
+    char *src = so_nested_wrap("let x: ", "Array<", 4000, "number", ">", ";\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = so_timed_extract(src, CBM_LANG_TYPESCRIPT, "deep.ts");
+    free(src);
+    printf("    TS 4000-deep Array<: %llu ms\n", (unsigned long long)ms);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+static int so_count_key_path(const CBMFileResult *r, const char *path) {
+    int n = 0;
+    for (int i = 0; i < r->string_refs.count; i++) {
+        const char *kp = r->string_refs.items[i].key_path;
+        if (kp && strcmp(kp, path) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* V2a: output contract of the YAML nested-key walk, small input. A leaf is
+ * reported once per enclosing mapping chain suffix (a.b.url, b.url, url). */
+TEST(yaml_nested_output_unchanged) {
+    const char *src = "a:\n  b:\n    url: https://svc.example.com/hook\n  c: https://c.example.com/x\n"
+                      "list:\n  - m:\n      n: https://n.example.com/y\n";
+    CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "small.yaml");
+    ASSERT_NOT_NULL(r);
+    int abu = so_count_key_path(r, "a.b.url");
+    int bu = so_count_key_path(r, "b.url");
+    int u = so_count_key_path(r, "url");
+    int ac = so_count_key_path(r, "a.c");
+    int c = so_count_key_path(r, "c");
+    int mn = so_count_key_path(r, "m.n");
+    int n = so_count_key_path(r, "n");
+    int total = r->string_refs.count;
+    cbm_free_result(r);
+    ASSERT_EQ(abu, 1);
+    ASSERT_EQ(bu, 1);
+    ASSERT_EQ(u, 1);
+    ASSERT_EQ(ac, 1);
+    ASSERT_EQ(c, 1);
+    ASSERT_EQ(mn, 1);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(total, 7);
+    PASS();
+}
+
+/* Build `depth` nested `a:` mappings (1-space steps) over `wide` scalar keys and
+ * one URL leaf; extract it and return elapsed ms and the string_ref count. */
+static uint64_t so_yaml_chain_extract(int depth, int wide, int *refs_out) {
+    size_t sz = (size_t)depth * ((size_t)depth + 4) / 2 + (size_t)wide * ((size_t)depth + 16) + 256;
+    char *src = malloc(sz);
+    if (!src) {
+        return 0;
+    }
+    char *p = src;
+    for (int i = 0; i < depth; i++) {
+        memset(p, ' ', (size_t)i);
+        p += i;
+        *p++ = 'a';
+        *p++ = ':';
+        *p++ = '\n';
+    }
+    for (int w = 0; w < wide; w++) {
+        memset(p, ' ', (size_t)depth);
+        p += depth;
+        p += snprintf(p, sz - (size_t)(p - src), "x%d: 1\n", w);
+    }
+    memset(p, ' ', (size_t)depth);
+    p += depth;
+    snprintf(p, sz - (size_t)(p - src), "url: https://svc.example.com/hook\n");
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "chain.yaml");
+    uint64_t ms = cbm_now_ms() - t0;
+    free(src);
+    *refs_out = -1;
+    if (r) {
+        *refs_out = r->string_refs.count;
+        cbm_free_result(r);
+    }
+    return ms;
+}
+
+/* V2b: handle_yaml_nested re-walked the whole subtree for every nested
+ * block_mapping, so each of the DEPTH ancestors of a wide mapping re-visited all
+ * of its keys (and rebuilt every dotted path): quadratic in visits and in arena
+ * bytes. The YAML scanner caps block nesting near 250 levels, so the shape is a
+ * deep chain over a wide bottom mapping. Cost must not scale with the depth:
+ * compare against the same keys under a single parent. */
+TEST(yaml_deep_nested_mappings_linear) {
+    enum { DEPTH = 200, WIDE = 20000 };
+    int flat_refs = 0;
+    int deep_refs = 0;
+    uint64_t flat_ms = so_yaml_chain_extract(1, WIDE, &flat_refs);
+    uint64_t deep_ms = so_yaml_chain_extract(DEPTH, WIDE, &deep_refs);
+    printf("    YAML %d keys: flat %llu ms, %d-deep chain %llu ms (%d refs)\n", (int)WIDE,
+           (unsigned long long)flat_ms, (int)DEPTH, (unsigned long long)deep_ms, deep_refs);
+    ASSERT_EQ(flat_refs, 2);
+    ASSERT_EQ(deep_refs, DEPTH + 1);
+    ASSERT_LT(deep_ms, 20000);
+    ASSERT_LT(deep_ms, flat_ms * 8 + 500);
     PASS();
 }
 
@@ -846,6 +1339,23 @@ SUITE(stack_overflow_c) {
     RUN_TEST(ts_imports_exceed_512);
     RUN_TEST(js_deeply_nested_calls);
     RUN_TEST(yaml_vars_exceed_256);
+    RUN_TEST(clojure_deep_nested_calls_no_hang);
+    RUN_TEST(js_long_member_chain_no_hang);
+    RUN_TEST(go_raw_string_route_path_stripped);
+    RUN_TEST(python_prefixed_string_route_path_stripped);
+    RUN_TEST(js_emit_concat_channel_not_truncated);
+    RUN_TEST(go_many_shadow_bindings_no_slowdown);
+    RUN_TEST(js_member_chain_30000_scope_stack_linear);
+    RUN_TEST(python_many_unique_names_one_scope_linear);
+    RUN_TEST(json_deep_array_infra_scan_linear);
+    RUN_TEST(yaml_infra_sequence_items_exceed_512);
+    RUN_TEST(yaml_nested_map_keys_exceed_256);
+    RUN_TEST(cpp_deep_initializer_list_usages_linear);
+    RUN_TEST(cpp_deep_template_args_usage_work_linear);
+    RUN_TEST(java_deep_generics_usages_linear);
+    RUN_TEST(ts_deep_generics_usages_linear);
+    RUN_TEST(yaml_nested_output_unchanged);
+    RUN_TEST(yaml_deep_nested_mappings_linear);
 
     cbm_shutdown();
 }

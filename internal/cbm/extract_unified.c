@@ -45,15 +45,23 @@ static CBMLexicalScope *mutable_lexical_scope_by_id(WalkState *state, uint32_t i
 }
 
 static uint32_t current_lexical_scope_id(const WalkState *state) {
-    if (!state) {
-        return 0;
+    return cbm_walk_active_lexical_scope_id(state);
+}
+
+/* True when any SCOPE_FUNC frame is open. O(1) via the top frame's chain. */
+static bool walk_inside_function_scope(const WalkState *state) {
+    return state->scope_top > 0 &&
+           state->scopes[state->scope_top - SKIP_ONE].nearest_func_frame >= 0;
+}
+
+/* Give the frame on top of the stack its lexical scope id and make it the
+ * nearest lexical frame for everything pushed above it. */
+static void set_top_frame_lexical_scope(WalkState *state, uint32_t id) {
+    CBMWalkScope *f = &state->scopes[state->scope_top - SKIP_ONE];
+    f->lexical_scope_id = id;
+    if (id != 0) {
+        f->nearest_lexical_frame = state->scope_top - SKIP_ONE;
     }
-    for (int i = state->scope_top - 1; i >= 0; i--) {
-        if (state->scopes[i].lexical_scope_id != 0) {
-            return state->scopes[i].lexical_scope_id;
-        }
-    }
-    return state->root_lexical_scope_id;
 }
 
 static bool ensure_lexical_scope_capacity(WalkState *state) {
@@ -315,6 +323,14 @@ static bool push_scope(WalkState *state, uint8_t kind, uint32_t depth, const cha
     f->depth = depth;
     f->qn = qn;
     f->lexical_scope_id = 0;
+    f->nearest_lexical_frame =
+        state->scope_top > 0 ? state->scopes[state->scope_top - SKIP_ONE].nearest_lexical_frame
+                             : -1;
+    f->nearest_func_frame =
+        kind == SCOPE_FUNC
+            ? state->scope_top
+            : (state->scope_top > 0 ? state->scopes[state->scope_top - SKIP_ONE].nearest_func_frame
+                                    : -1);
     f->invocation_kind = CBM_INVOCATION_NONE;
     f->callee_expr = (TSNode){0};
     f->callee_leaf = (TSNode){0};
@@ -363,8 +379,7 @@ static bool push_lexical_scope(WalkState *state, uint8_t walk_kind, uint32_t dep
         state->lexical_binding_tracking_failed = true;
         return false;
     }
-    state->scopes[state->scope_top - SKIP_ONE].lexical_scope_id =
-        add_lexical_scope(state, node, lexical_kind);
+    set_top_frame_lexical_scope(state, add_lexical_scope(state, node, lexical_kind));
     return true;
 }
 
@@ -375,7 +390,7 @@ static bool push_existing_lexical_scope(WalkState *state, uint8_t walk_kind, uin
         state->lexical_binding_tracking_failed = true;
         return false;
     }
-    state->scopes[state->scope_top - SKIP_ONE].lexical_scope_id = lexical_scope_id;
+    set_top_frame_lexical_scope(state, lexical_scope_id);
     uint32_t end_byte = ts_node_end_byte(node);
     if (end_byte > scope->end_byte) {
         scope->end_byte = end_byte;
@@ -390,9 +405,11 @@ static uint32_t active_same_function_scope_id(const WalkState *state, const char
     }
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
-    for (int i = state->scope_top - 1; i >= 0; i--) {
-        if (state->scopes[i].kind != SCOPE_FUNC || !state->scopes[i].qn ||
-            strcmp(state->scopes[i].qn, function_qn) != 0) {
+    int top_func =
+        state->scope_top > 0 ? state->scopes[state->scope_top - SKIP_ONE].nearest_func_frame : -1;
+    for (int i = top_func; i >= 0;
+         i = i > 0 ? state->scopes[i - SKIP_ONE].nearest_func_frame : -1) {
+        if (!state->scopes[i].qn || strcmp(state->scopes[i].qn, function_qn) != 0) {
             continue;
         }
         const CBMLexicalScope *scope =
@@ -598,7 +615,7 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
     if (ts_node_is_null(args) || ts_node_child_count(args) == 0) {
         return NULL;
     }
-    TSNode first_arg = ts_node_child(args, 0);
+    TSNode first_arg = cbm_elixir_unwrap_guard(ts_node_child(args, 0), ctx->source);
     if (ts_node_is_null(first_arg)) {
         return NULL;
     }
@@ -612,7 +629,28 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
     if (!name || !name[0]) {
         return NULL;
     }
-    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    /* Qualify with the enclosing modules, outermost first, exactly as
+     * extract_elixir_call() names the definition; otherwise the scope QN and
+     * the definition QN differ and every call inside the function is lost. */
+    const char *qualified = name;
+    enum { ELIXIR_MAX_MODULE_HOPS = 256 };
+    int hops = 0;
+    for (TSNode p = ts_node_parent(node); !ts_node_is_null(p) && hops < ELIXIR_MAX_MODULE_HOPS;
+         p = ts_node_parent(p), hops++) {
+        if (strcmp(ts_node_type(p), "call") != 0 || ts_node_child_count(p) == 0) {
+            continue;
+        }
+        char *m = cbm_node_text(ctx->arena, ts_node_child(p, 0), ctx->source);
+        if (!m || (strcmp(m, "defmodule") != 0 && strcmp(m, "defprotocol") != 0 &&
+                   strcmp(m, "defimpl") != 0)) {
+            continue;
+        }
+        const char *module = cbm_elixir_module_name(ctx, p, strcmp(m, "defimpl") == 0);
+        if (module) {
+            qualified = cbm_arena_sprintf(ctx->arena, "%s.%s", module, qualified);
+        }
+    }
+    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, qualified);
 }
 
 /* Resolve a CFML tag-function's QN for scope tracking. A <cffunction name="foo">
@@ -1555,101 +1593,256 @@ static void handle_url_builders(CBMExtractCtx *ctx, TSNode node, const WalkState
 
 // --- YAML nested field extraction (D2) ---
 
-/* Recursively walk YAML block_mapping_pair nodes, building dotted key paths.
+/* Walk YAML block_mapping_pair nodes, building dotted key paths.
  * Emits string_refs with key_path for leaf values that are URLs or config values.
- * Example: body.operational_info.post_url → "https://..." */
-// Classify and emit a YAML leaf value as a string_ref with key_path.
-static void emit_yaml_leaf_value(CBMExtractCtx *ctx, TSNode val, const char *path) {
+ * Example: body.operational_info.post_url → "https://..."
+ *
+ * A leaf is reported once for every mapping of its chain (the mappings nested
+ * through pair values, from the walk root down to the leaf's own mapping), with
+ * the key path that starts at that mapping: `a: {b: {url: X}}` yields a.b.url,
+ * b.url and url. The old code got there by re-walking the whole subtree from
+ * every nested mapping, which visited each pair once per enclosing mapping and
+ * rebuilt every dotted path each time -- quadratic visits and quadratic arena
+ * bytes on deep nesting. The chain is now walked once; the per-mapping reports
+ * only re-join key text for the leaves that actually emit. */
+
+/* A leaf value that classified as a reportable string. */
+typedef struct {
+    const char *content; /* value text, quotes stripped (not terminated at length) */
+    int length;
+    int kind;
+    int nkeys; /* keys from the walk root down to this leaf's key */
+    const struct yaml_key_link *key;
+} yaml_leaf_t;
+
+/* One key on the way down; links point toward the walk root. */
+typedef struct yaml_key_link {
+    const struct yaml_key_link *up;
+    const char *text;
+} yaml_key_link_t;
+
+/* A mapping of the chain and the run of leaves (in walk order) below it. */
+typedef struct {
+    int depth; /* keys above this mapping in the chain */
+    int leaf_begin;
+    int leaf_end;
+} yaml_map_t;
+
+typedef struct {
+    TSNode node;
+    const yaml_key_link_t *keys;
+    int depth;
+    int end_of_map; /* >= 0: not a node, closes yaml_map_t[end_of_map] */
+} yaml_frame_t;
+
+typedef struct {
+    yaml_frame_t *frames;
+    int frame_top;
+    int frame_cap;
+    yaml_leaf_t *leaves;
+    int leaf_count;
+    int leaf_cap;
+    yaml_map_t *maps;
+    int map_count;
+    int map_cap;
+    bool failed;
+} yaml_walk_t;
+
+static bool yaml_grow(void **items, int *cap, int needed, size_t elem) {
+    if (needed <= *cap) {
+        return true;
+    }
+    int new_cap = *cap ? *cap : CBM_SZ_64;
+    while (new_cap < needed) {
+        new_cap *= PAIR_LEN;
+    }
+    void *grown = realloc(*items, (size_t)new_cap * elem);
+    if (!grown) {
+        return false;
+    }
+    *items = grown;
+    *cap = new_cap;
+    return true;
+}
+
+static void yaml_push_frame(yaml_walk_t *w, TSNode node, const yaml_key_link_t *keys, int depth,
+                            int end_of_map) {
+    if (!yaml_grow((void **)&w->frames, &w->frame_cap, w->frame_top + SKIP_ONE,
+                   sizeof(*w->frames))) {
+        w->failed = true;
+        return;
+    }
+    w->frames[w->frame_top++] = (yaml_frame_t){node, keys, depth, end_of_map};
+}
+
+/* Strip quotes and classify a leaf value. Returns the string kind, or -1 when
+ * the value is empty or not a reportable string. */
+static int yaml_classify_leaf(CBMExtractCtx *ctx, TSNode val, const char **content, int *length) {
     char *val_text = cbm_node_text(ctx->arena, val, ctx->source);
     if (!val_text || !val_text[0]) {
-        return;
+        return -1;
     }
-
     int vlen = (int)strlen(val_text);
-    const char *content = val_text;
+    const char *text = val_text;
     if (vlen >= CBM_QUOTE_PAIR && (val_text[0] == '"' || val_text[0] == '\'')) {
-        content = val_text + SKIP_ONE;
+        text = val_text + SKIP_ONE;
         vlen -= PAIR_LEN;
         if (vlen <= 0) {
-            return;
+            return -1;
         }
     }
+    *content = text;
+    *length = vlen;
+    return cbm_classify_string(text, vlen);
+}
 
-    int kind_val = cbm_classify_string(content, vlen);
-    if (kind_val < 0) {
+/* Push the block_mapping children of a block_node/block_mapping value, last
+ * first so they pop in document order. */
+static void yaml_push_block_children(yaml_walk_t *w, TSNode val, const yaml_key_link_t *keys,
+                                     int depth) {
+    uint32_t vnc = ts_node_named_child_count(val);
+    for (int vi = (int)vnc - SKIP_ONE; vi >= 0; vi--) {
+        TSNode vc = ts_node_named_child(val, (uint32_t)vi);
+        const char *vctype = ts_node_type(vc);
+        if (strcmp(vctype, "block_mapping") == 0 || strcmp(vctype, "block_mapping_pair") == 0) {
+            yaml_push_frame(w, vc, keys, depth, -1);
+        }
+    }
+}
+
+/* Visit the pairs of one mapping frame: leaves are recorded, nested block
+ * values are queued as frames. */
+static void yaml_visit_mapping(CBMExtractCtx *ctx, yaml_walk_t *w, const yaml_frame_t *frame) {
+    uint32_t nc = ts_node_named_child_count(frame->node);
+    for (uint32_t i = 0; i < nc && !w->failed; i++) {
+        TSNode child = ts_node_named_child(frame->node, i);
+        if (strcmp(ts_node_type(child), "block_mapping_pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(child, TS_FIELD("key"));
+        if (ts_node_is_null(key)) {
+            continue;
+        }
+        char *key_text = cbm_node_text(ctx->arena, key, ctx->source);
+        if (!key_text || !key_text[0]) {
+            continue;
+        }
+        TSNode val = ts_node_child_by_field_name(child, TS_FIELD("value"));
+        if (ts_node_is_null(val)) {
+            continue;
+        }
+        yaml_key_link_t *link = (yaml_key_link_t *)cbm_arena_alloc(ctx->arena, sizeof(*link));
+        if (!link) {
+            w->failed = true;
+            return;
+        }
+        link->up = frame->keys;
+        link->text = key_text;
+        const char *vk = ts_node_type(val);
+        if (strcmp(vk, "block_node") == 0 || strcmp(vk, "block_mapping") == 0) {
+            yaml_push_block_children(w, val, link, frame->depth + SKIP_ONE);
+            continue;
+        }
+        const char *content = NULL;
+        int length = 0;
+        int kind = yaml_classify_leaf(ctx, val, &content, &length);
+        if (kind < 0) {
+            continue;
+        }
+        if (!yaml_grow((void **)&w->leaves, &w->leaf_cap, w->leaf_count + SKIP_ONE,
+                       sizeof(*w->leaves))) {
+            w->failed = true;
+            return;
+        }
+        w->leaves[w->leaf_count++] =
+            (yaml_leaf_t){content, length, kind, frame->depth + SKIP_ONE, link};
+    }
+}
+
+/* Report one leaf under the mapping that sits `depth` keys below the walk root. */
+static void yaml_emit_leaf(CBMExtractCtx *ctx, const yaml_leaf_t *leaf, int depth,
+                           const char **scratch) {
+    const yaml_key_link_t *link = leaf->key;
+    for (int k = leaf->nkeys - SKIP_ONE; k >= 0; k--, link = link->up) {
+        scratch[k] = link->text;
+    }
+    size_t total = 0;
+    for (int k = depth; k < leaf->nkeys; k++) {
+        total += strlen(scratch[k]) + SKIP_ONE; /* key plus '.' or the terminator */
+    }
+    char *path = (char *)cbm_arena_alloc(ctx->arena, total);
+    if (!path) {
         return;
     }
-
-    char *stored = cbm_arena_strndup(ctx->arena, content, (size_t)vlen);
+    char *out = path;
+    for (int k = depth; k < leaf->nkeys; k++) {
+        size_t n = strlen(scratch[k]);
+        memcpy(out, scratch[k], n);
+        out += n;
+        *out++ = (k + SKIP_ONE < leaf->nkeys) ? '.' : '\0';
+    }
+    char *stored = cbm_arena_strndup(ctx->arena, leaf->content, (size_t)leaf->length);
     if (!stored) {
         return;
     }
-
     CBMStringRef ref = {
         .value = stored,
         .enclosing_func_qn = ctx->module_qn,
         .key_path = path,
-        .kind = (CBMStringRefKind)kind_val,
+        .kind = (CBMStringRefKind)leaf->kind,
     };
     cbm_stringref_push(&ctx->result->string_refs, ctx->arena, ref);
 }
 
-typedef struct {
-    TSNode node;
-    const char *prefix;
-} yaml_walk_frame_t;
-#define YAML_WALK_STACK_CAP CBM_SZ_256
+static void walk_yaml_mapping(CBMExtractCtx *ctx, TSNode root) {
+    yaml_walk_t w;
+    memset(&w, 0, sizeof(w));
+    yaml_push_frame(&w, root, NULL, 0, -1);
 
-/* Push block_mapping children of a block_node/block_mapping value onto the walk stack. */
-static void push_yaml_block_children(TSNode val, const char *path, yaml_walk_frame_t *stack,
-                                     int *top) {
-    uint32_t vnc = ts_node_named_child_count(val);
-    for (int vi = (int)vnc - SKIP_ONE; vi >= 0 && *top < YAML_WALK_STACK_CAP; vi--) {
-        TSNode vc = ts_node_named_child(val, (uint32_t)vi);
-        const char *vctype = ts_node_type(vc);
-        if (strcmp(vctype, "block_mapping") == 0 || strcmp(vctype, "block_mapping_pair") == 0) {
-            stack[(*top)++] = (yaml_walk_frame_t){vc, path};
+    while (w.frame_top > 0 && !w.failed) {
+        yaml_frame_t frame = w.frames[--w.frame_top];
+        if (frame.end_of_map >= 0) {
+            w.maps[frame.end_of_map].leaf_end = w.leaf_count;
+            continue;
+        }
+        /* Pair frames pushed for a bare block_mapping value carry no nested
+         * pairs of their own; only mappings contribute. */
+        if (strcmp(ts_node_type(frame.node), "block_mapping") != 0) {
+            continue;
+        }
+        if (!yaml_grow((void **)&w.maps, &w.map_cap, w.map_count + SKIP_ONE, sizeof(*w.maps))) {
+            w.failed = true;
+            break;
+        }
+        int map_index = w.map_count++;
+        w.maps[map_index] = (yaml_map_t){frame.depth, w.leaf_count, 0};
+        /* Pushed before the pairs are visited, so it pops after every frame
+         * they queue and every frame those queue in turn. */
+        yaml_push_frame(&w, frame.node, NULL, 0, map_index);
+        yaml_visit_mapping(ctx, &w, &frame);
+    }
+
+    if (!w.failed) {
+        int max_keys = 0;
+        for (int l = 0; l < w.leaf_count; l++) {
+            if (w.leaves[l].nkeys > max_keys) {
+                max_keys = w.leaves[l].nkeys;
+            }
+        }
+        const char **scratch =
+            (const char **)malloc(((size_t)max_keys + SKIP_ONE) * sizeof(*scratch));
+        if (scratch) {
+            for (int m = 0; m < w.map_count; m++) {
+                for (int l = w.maps[m].leaf_begin; l < w.maps[m].leaf_end; l++) {
+                    yaml_emit_leaf(ctx, &w.leaves[l], w.maps[m].depth, scratch);
+                }
+            }
+            free((void *)scratch);
         }
     }
-}
-
-static void walk_yaml_mapping(CBMExtractCtx *ctx, TSNode root, const char *root_prefix) {
-    yaml_walk_frame_t stack[YAML_WALK_STACK_CAP];
-    int top = 0;
-    stack[top++] = (yaml_walk_frame_t){root, root_prefix};
-
-    while (top > 0) {
-        yaml_walk_frame_t frame = stack[--top];
-        TSNode node = frame.node;
-        const char *prefix = frame.prefix;
-        uint32_t nc = ts_node_named_child_count(node);
-        for (uint32_t i = 0; i < nc; i++) {
-            TSNode child = ts_node_named_child(node, i);
-            if (strcmp(ts_node_type(child), "block_mapping_pair") != 0) {
-                continue;
-            }
-            TSNode key = ts_node_child_by_field_name(child, TS_FIELD("key"));
-            if (ts_node_is_null(key)) {
-                continue;
-            }
-            char *key_text = cbm_node_text(ctx->arena, key, ctx->source);
-            if (!key_text || !key_text[0]) {
-                continue;
-            }
-            const char *path =
-                prefix ? cbm_arena_sprintf(ctx->arena, "%s.%s", prefix, key_text) : key_text;
-            TSNode val = ts_node_child_by_field_name(child, TS_FIELD("value"));
-            if (ts_node_is_null(val)) {
-                continue;
-            }
-            const char *vk = ts_node_type(val);
-            if (strcmp(vk, "block_node") == 0 || strcmp(vk, "block_mapping") == 0) {
-                push_yaml_block_children(val, path, stack, &top);
-                continue;
-            }
-            emit_yaml_leaf_value(ctx, val, path);
-        }
-    }
+    free(w.frames);
+    free(w.leaves);
+    free(w.maps);
 }
 
 /* ── Infrastructure binding extraction ─────────────────────────────
@@ -1806,23 +1999,6 @@ static void scan_mapping_for_bindings(CBMExtractCtx *ctx, TSNode mapping) {
     }
 
     emit_infra_bindings(ctx, sources, source_keys, n_sources, targets, n_targets);
-}
-
-#define INFRA_SCAN_STACK_CAP CBM_SZ_512
-static void scan_yaml_for_infra_bindings(CBMExtractCtx *ctx, TSNode root) {
-    TSNode stack[INFRA_SCAN_STACK_CAP];
-    int top = 0;
-    stack[top++] = root;
-    while (top > 0) {
-        TSNode node = stack[--top];
-        if (strcmp(ts_node_type(node), "block_mapping") == 0) {
-            scan_mapping_for_bindings(ctx, node);
-        }
-        uint32_t nc = ts_node_named_child_count(node);
-        for (int i = (int)nc - SKIP_ONE; i >= 0 && top < INFRA_SCAN_STACK_CAP; i--) {
-            stack[top++] = ts_node_named_child(node, (uint32_t)i);
-        }
-    }
 }
 
 /* ── HCL infrastructure binding extraction ───────────────────────────
@@ -1999,7 +2175,45 @@ static void scan_hcl_block_for_bindings(CBMExtractCtx *ctx, TSNode block) {
     emit_infra_bindings(ctx, sources, source_keys, n_sources, targets, n_targets);
 }
 
-/* Handle YAML files: walk top-level block_mapping recursively */
+/* A block_mapping starts a walk when it sits under the stream, a document or a
+ * block_node. */
+static bool yaml_mapping_starts_walk(TSNode node) {
+    TSNode parent = ts_node_parent(node);
+    if (ts_node_is_null(parent)) {
+        return true;
+    }
+    const char *pk = ts_node_type(parent);
+    return strcmp(pk, "stream") == 0 || strcmp(pk, "document") == 0 ||
+           strcmp(pk, "block_node") == 0;
+}
+
+/* Is `node` the value of a pair of a mapping that starts a walk of its own?
+ * Then that walk already reports everything below `node` (its pair has a
+ * non-empty key, or the walk would have skipped it), and `node` must not be
+ * walked again. */
+static bool yaml_mapping_covered_by_enclosing_walk(TSNode node) {
+    TSNode holder = ts_node_parent(node);
+    if (ts_node_is_null(holder) || strcmp(ts_node_type(holder), "block_node") != 0) {
+        return false;
+    }
+    TSNode pair = ts_node_parent(holder);
+    if (ts_node_is_null(pair) || strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
+        return false;
+    }
+    TSNode pair_value = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+    if (ts_node_is_null(pair_value) || !ts_node_eq(pair_value, holder)) {
+        return false;
+    }
+    TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+    if (ts_node_is_null(key) || ts_node_end_byte(key) <= ts_node_start_byte(key)) {
+        return false;
+    }
+    TSNode enclosing = ts_node_parent(pair);
+    return !ts_node_is_null(enclosing) && strcmp(ts_node_type(enclosing), "block_mapping") == 0 &&
+           yaml_mapping_starts_walk(enclosing);
+}
+
+/* Handle YAML files: walk each top-level block_mapping chain once. */
 static void handle_yaml_nested(CBMExtractCtx *ctx, TSNode node) {
     if (ctx->language != CBM_LANG_YAML) {
         return;
@@ -2008,16 +2222,8 @@ static void handle_yaml_nested(CBMExtractCtx *ctx, TSNode node) {
     if (strcmp(kind, "block_mapping") != 0) {
         return;
     }
-    /* Only process root-level block_mapping (depth 0 or 1) */
-    TSNode parent = ts_node_parent(node);
-    if (ts_node_is_null(parent)) {
-        walk_yaml_mapping(ctx, node, NULL);
-    } else {
-        const char *pk = ts_node_type(parent);
-        if (strcmp(pk, "stream") == 0 || strcmp(pk, "document") == 0 ||
-            strcmp(pk, "block_node") == 0) {
-            walk_yaml_mapping(ctx, node, NULL);
-        }
+    if (yaml_mapping_starts_walk(node) && !yaml_mapping_covered_by_enclosing_walk(node)) {
+        walk_yaml_mapping(ctx, node);
     }
 }
 
@@ -2025,11 +2231,14 @@ static void handle_yaml_nested(CBMExtractCtx *ctx, TSNode node) {
 
 // Scan infra bindings for YAML/JSON/HCL languages.
 static void scan_infra_bindings(CBMExtractCtx *ctx, TSNode node) {
-    if (ctx->language == CBM_LANG_YAML || ctx->language == CBM_LANG_JSON) {
-        const char *nk = ts_node_type(node);
-        if (strcmp(nk, "block_sequence") == 0 || strcmp(nk, "block_mapping") == 0 ||
-            strcmp(nk, "array") == 0 || strcmp(nk, "document") == 0) {
-            scan_yaml_for_infra_bindings(ctx, node);
+    if (ctx->language == CBM_LANG_YAML) {
+        /* The unified walk already visits every node, so each block_mapping is
+         * scanned exactly once, here. Re-scanning the whole subtree from every
+         * sequence/mapping/document was quadratic on deep nesting and emitted
+         * each binding once per enclosing container. JSON has no block_mapping,
+         * so the old JSON array rescan could never produce a binding. */
+        if (strcmp(ts_node_type(node), "block_mapping") == 0) {
+            scan_mapping_for_bindings(ctx, node);
         }
     } else if (ctx->language == CBM_LANG_HCL) {
         if (strcmp(ts_node_type(node), "block") == 0) {
@@ -2246,10 +2455,8 @@ static TSNode objectscript_routine_preceding_tag(TSNode node) {
 
 static bool push_pre_node_scope(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
                                 WalkState *state, uint32_t depth) {
-    for (int i = 0; i < state->scope_top; i++) {
-        if (state->scopes[i].kind == SCOPE_FUNC) {
-            return false;
-        }
+    if (walk_inside_function_scope(state)) {
+        return false;
     }
 
     TSNode label = {0};
@@ -2360,11 +2567,22 @@ static bool lexical_boundary_kind(TSNode node, CBMLexicalScopeKind *out_kind) {
 static bool node_already_has_lexical_scope(const WalkState *state, TSNode node) {
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
-    for (int i = state->scope_top - 1; i >= 0; i--) {
+    /* Walk only the frames that carry a lexical scope, innermost first. Frame
+     * scopes nest, so once one strictly contains the node no frame below it can
+     * share the node's exact span: stop there instead of scanning the stack. */
+    int i = state->scope_top > 0 ? state->scopes[state->scope_top - SKIP_ONE].nearest_lexical_frame
+                                 : -1;
+    for (; i >= 0; i = i > 0 ? state->scopes[i - SKIP_ONE].nearest_lexical_frame : -1) {
         const CBMLexicalScope *scope =
             lexical_scope_by_id(state, state->scopes[i].lexical_scope_id);
-        if (scope && scope->start_byte == start && scope->end_byte == end) {
+        if (!scope) {
+            continue;
+        }
+        if (scope->start_byte == start && scope->end_byte == end) {
             return true;
+        }
+        if (scope->start_byte <= start && end <= scope->end_byte) {
+            break;
         }
     }
     return false;
@@ -2395,12 +2613,7 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
          * scope (none already on the stack), matching what the def walk extracts. */
         bool skip_nested = false;
         if (ctx->language == CBM_LANG_OCAML) {
-            for (int i = 0; i < state->scope_top; i++) {
-                if (state->scopes[i].kind == SCOPE_FUNC) {
-                    skip_nested = true;
-                    break;
-                }
-            }
+            skip_nested = walk_inside_function_scope(state);
         }
         if (!skip_nested) {
             const char *fqn = compute_func_qn(ctx, node, spec, state);

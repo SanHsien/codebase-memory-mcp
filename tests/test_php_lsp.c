@@ -18,7 +18,9 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
+#include "../src/foundation/platform.h"
 #include "lsp/php_lsp.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Helpers ───────────────────────────────────────────────────── */
@@ -5310,6 +5312,185 @@ TEST(phplsp_ordinary_same_leaf_calls_join_by_exact_site) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* ── G2 hardening: nesting / hang regressions ──────────────────── */
+
+/* head + open*n + core + close*n + tail, heap-allocated (caller frees). */
+static char *php_build_nested(const char *head, const char *open, int n, const char *core,
+                              const char *close, const char *tail) {
+    size_t ol = strlen(open), cl = strlen(close);
+    size_t len = strlen(head) + (size_t)n * (ol + cl) + strlen(core) + strlen(tail) + 1;
+    char *buf = (char *)malloc(len);
+    if (!buf)
+        return NULL;
+    char *p = buf;
+    memcpy(p, head, strlen(head));
+    p += strlen(head);
+    for (int i = 0; i < n; i++) {
+        memcpy(p, open, ol);
+        p += ol;
+    }
+    memcpy(p, core, strlen(core));
+    p += strlen(core);
+    for (int i = 0; i < n; i++) {
+        memcpy(p, close, cl);
+        p += cl;
+    }
+    memcpy(p, tail, strlen(tail));
+    p += strlen(tail);
+    *p = '\0';
+    return buf;
+}
+
+/* Drive the PHP LSP entry point directly (skips the rest of extraction) and
+ * return the elapsed milliseconds. */
+static uint64_t php_lsp_cross_ms(const char *src) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_php_lsp_cross(&arena, src, (int)strlen(src), "test.main", NULL, 0, NULL, NULL, 0, NULL,
+                          &out);
+    uint64_t dt = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    return dt;
+}
+
+/* P1: `(fn() => (fn() => 1)->bindTo(new A))->bindTo(new A)` walked the bound
+ * closure twice per level (bindTo branch, then generic recursion): O(2^depth). */
+TEST(phplsp_nested_bindto_chain_is_linear) {
+    char *src = php_build_nested("<?php\n", "(fn() => ", 35, "1", ")->bindTo(new A)", ";");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P1b: bindTo still rebinds $this, and the calls inside the closure are
+ * resolved exactly once. */
+TEST(phplsp_bindto_inline_closure_resolved_once) {
+    const char *src =
+        "<?php\n"
+        "class Svc { public function ping(): void {} }\n"
+        "class A { public Svc $svc; }\n"
+        "class Caller {\n"
+        "    public function go(): void {\n"
+        "        $f = (function () { $this->svc->ping(); })->bindTo(new A);\n"
+        "    }\n"
+        "}\n";
+    CBMFileResult *r = extract_php(src);
+    ASSERT(r);
+    int hits = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+        if (rc->callee_qn && strstr(rc->callee_qn, "Svc.ping"))
+            hits++;
+    }
+    ASSERT_EQ(hits, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* P2: a 30000-operand `&&` chain is left-nested 30000 deep. */
+TEST(phplsp_long_and_chain_condition_is_bounded) {
+    char *src = php_build_nested("<?php\nif (", "$a && ", 30000, "$a", "", ") {}\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P2: deeply parenthesised narrowing predicate. */
+TEST(phplsp_deep_paren_condition_is_bounded) {
+    char *src = php_build_nested("<?php\nif (", "(", 30000, "$a instanceof A", ")", ") {}\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P2: deeply nested braces as an if-body (stmt_is_terminator). */
+TEST(phplsp_deep_brace_if_body_is_bounded) {
+    char *src = php_build_nested("<?php\nif (!($a instanceof A)) ", "{", 30000, "return;", "}", "\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P2: first-class callable whose callee is a deeply parenthesised expression. */
+TEST(phplsp_deep_paren_first_class_callable_is_bounded) {
+    char *src = php_build_nested("<?php\n", "(", 30000, "f", ")", "(...);\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P2: narrowing still works for an ordinary short conjunction. */
+TEST(phplsp_and_chain_narrowing_still_applies) {
+    const char *src =
+        "<?php\n"
+        "class Foo { public function m(): void {} }\n"
+        "class Caller {\n"
+        "    public function go($a, $b): void {\n"
+        "        if ($b && $a instanceof Foo && $b) { $a->m(); }\n"
+        "    }\n"
+        "}\n";
+    CBMFileResult *r = extract_php(src);
+    ASSERT(r);
+    ASSERT(require_resolved(r, "Caller.go", "Foo.m") >= 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* P3: fetch_leading_phpdoc located the member by scanning children from 0
+ * (ts_node_child is O(i)), so a class with many members was cubic. */
+TEST(phplsp_many_methods_class_is_not_quadratic) {
+    enum { N = 6000 };
+    size_t cap = (size_t)N * 64 + 64;
+    char *src = (char *)malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t len = (size_t)snprintf(src, cap, "<?php\nclass Big {\n");
+    for (int i = 0; i < N; i++)
+        len += (size_t)snprintf(src + len, cap - len,
+                                "  public function m%d(): int { return 1; }\n", i);
+    snprintf(src + len, cap - len, "}\n");
+    uint64_t ms = php_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* P3: php_lsp_collect_class_fields kept a fixed 256-entry stack, silently
+ * dropping classes after the 256th top-level node. */
+TEST(phplsp_typed_field_after_many_toplevel_nodes) {
+    enum { N = 400 };
+    size_t cap = (size_t)N * 24 + 512;
+    char *src = (char *)malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t len =
+        (size_t)snprintf(src, cap, "<?php\nclass Svc { public function run(): void {} }\n");
+    for (int i = 0; i < N; i++)
+        len += (size_t)snprintf(src + len, cap - len, "$v%d = %d;\n", i, i);
+    snprintf(src + len, cap - len,
+             "class Holder {\n"
+             "    private Svc $svc;\n"
+             "    public function go(): void { $this->svc->run(); }\n"
+             "}\n");
+    CBMFileResult *r = extract_php(src);
+    free(src);
+    ASSERT(r);
+    ASSERT(require_resolved(r, "Holder.go", "Svc.run") >= 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(php_lsp) {
     /* Phase 1 baseline regressions */
     RUN_TEST(phplsp_local_method_via_new_assignment);
@@ -5602,4 +5783,14 @@ SUITE(php_lsp) {
     RUN_TEST(phplsp_realistic_carbon_chain_in_method);
     RUN_TEST(phplsp_realistic_eloquent_model);
     RUN_TEST(phplsp_ordinary_same_leaf_calls_join_by_exact_site);
+    /* G2 hardening */
+    RUN_TEST(phplsp_nested_bindto_chain_is_linear);
+    RUN_TEST(phplsp_bindto_inline_closure_resolved_once);
+    RUN_TEST(phplsp_long_and_chain_condition_is_bounded);
+    RUN_TEST(phplsp_deep_paren_condition_is_bounded);
+    RUN_TEST(phplsp_deep_brace_if_body_is_bounded);
+    RUN_TEST(phplsp_deep_paren_first_class_callable_is_bounded);
+    RUN_TEST(phplsp_and_chain_narrowing_still_applies);
+    RUN_TEST(phplsp_many_methods_class_is_not_quadratic);
+    RUN_TEST(phplsp_typed_field_after_many_toplevel_nodes);
 }

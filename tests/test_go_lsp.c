@@ -13,6 +13,7 @@
 #include "cbm.h"
 #include "lsp/go_lsp.h"
 #include "pipeline/lsp_resolve.h"
+#include <foundation/platform.h>
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -1433,6 +1434,74 @@ TEST(golsp_crossfile_local_interface_single_impl) {
     PASS();
 }
 
+/* ── Adversarial input: exponential re-walks / unbounded recursion ─ */
+
+static void golsp_append_n(char *buf, size_t *pos, const char *s, int n) {
+    size_t len = strlen(s);
+    for (int i = 0; i < n; i++) {
+        memcpy(buf + *pos, s, len);
+        *pos += len;
+    }
+    buf[*pos] = '\0';
+}
+
+TEST(golsp_nested_closures_linear) {
+    /* a1 := func(){ a2 := func(){ ... } } 28 deep: evaluating the RHS (which
+     * walks the func literal) and then walking it again is 2^28. */
+    enum { DEPTH = 28 };
+    size_t cap = (size_t)DEPTH * 32 + 128;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    golsp_append_n(src, &pos, "package main\nfunc g() {}\nfunc f() {\n", 1);
+    for (int i = 0; i < DEPTH; i++) {
+        char line[40];
+        snprintf(line, sizeof(line), "a%d := func() {\n", i);
+        golsp_append_n(src, &pos, line, 1);
+    }
+    golsp_append_n(src, &pos, "g()\n", 1);
+    golsp_append_n(src, &pos, "}\n", DEPTH);
+    golsp_append_n(src, &pos, "}\n", 1);
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = extract_go(src);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(elapsed < 20000);
+    /* The innermost call is still resolved. */
+    ASSERT_GTE(require_resolved(r, "f", "g"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(golsp_long_binary_chain_bounded) {
+    /* x := a+a+...+a with 30000 terms: expression typing must be depth-capped. */
+    enum { TERMS = 30000 };
+    size_t cap = (size_t)TERMS * 2 + 256;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    golsp_append_n(src, &pos, "package main\nfunc f(a int) {\n\tx := a", 1);
+    golsp_append_n(src, &pos, "+a", TERMS - 1);
+    golsp_append_n(src, &pos, "\n\t_ = x\n}\n", 1);
+    /* Drive only the Go LSP: the per-file extractor passes that run before it
+     * in cbm_extract_file are not under test here. */
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_go_lsp_cross(&arena, src, (int)strlen(src), "test.main", NULL, 0, NULL, NULL, 0, NULL,
+                         &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    free(src);
+    ASSERT_TRUE(elapsed < 20000);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(go_lsp) {
@@ -1545,4 +1614,8 @@ SUITE(go_lsp) {
     RUN_TEST(golsp_crossfile_map_index);
     RUN_TEST(golsp_crossfile_stdlib_interface);
     RUN_TEST(golsp_crossfile_local_interface_single_impl);
+
+    /* Adversarial input: bounded work */
+    RUN_TEST(golsp_nested_closures_linear);
+    RUN_TEST(golsp_long_binary_chain_bounded);
 }

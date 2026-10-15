@@ -9562,6 +9562,232 @@ TEST(objectscript_udl_long_trigger_body_is_valid_json) {
     PASS();
 }
 
+/* ── Batch A: extract_defs.c robustness / completeness ───────────── */
+
+/* 30000 stacked `template<class T>` heads: find_cpp_template_inner_node recursed once
+ * per head (unbounded native recursion), so the file crashed or hung the worker. It
+ * walks the chain iteratively now, and the function under the heads is still found. */
+TEST(extract_cpp_deeply_nested_template_chain_terminates) {
+    enum { HEADS = 30000 };
+    const char *head = "template<class T> ";
+    const char *tail = "void deep_template_fn(){}\n";
+    size_t sz = (size_t)HEADS * strlen(head) + strlen(tail) + 1;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    for (int i = 0; i < HEADS; i++) {
+        memcpy(p, head, strlen(head));
+        p += strlen(head);
+    }
+    memcpy(p, tail, strlen(tail) + 1);
+    /* The definitions pass is what recursed; cap the unified walk (see
+     * extract_walk_truncated_when_a_node_budget_is_set) so the time bound below measures it. */
+    cbm_setenv("CBM_TEST_WALK_BUDGET_NODES", "1000", 1);
+    uint64_t started = cbm_now_ms();
+    CBMFileResult *r = extract(src, CBM_LANG_CPP, "t", "deep_template.cpp");
+    uint64_t elapsed = cbm_now_ms() - started;
+    cbm_unsetenv("CBM_TEST_WALK_BUDGET_NODES");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT(elapsed, 20000);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A guard clause makes the head of `def` a `when` binary_operator
+ * (`foo(x) when is_integer(x)`), not a call/identifier: its left operand is the head. */
+TEST(extract_elixir_guarded_def_is_a_function) {
+    CBMFileResult *r = extract("defmodule M do\n"
+                               "  def foo(x) when is_integer(x) do\n"
+                               "    x\n"
+                               "  end\n"
+                               "  defp bar(y) when y > 0, do: y\n"
+                               "  def baz(z), do: z\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "m.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Function", "foo"));
+    ASSERT_TRUE(has_def(r, "Function", "bar"));
+    ASSERT_TRUE(has_def(r, "Function", "baz"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* defimpl / defprotocol bodies hold def clauses just like a defmodule. */
+TEST(extract_elixir_defimpl_and_defprotocol_bodies_are_walked) {
+    CBMFileResult *r = extract("defprotocol Sizer do\n"
+                               "  def size(data)\n"
+                               "end\n"
+                               "defimpl P, for: T do\n"
+                               "  def f(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "impl.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Function", "f"));
+    ASSERT_TRUE(has_def(r, "Function", "size"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Two modules in one file may define the same function name: the qualified name
+ * has to carry the enclosing module or the second collapses into the first. */
+TEST(extract_elixir_same_function_in_two_modules_has_distinct_qns) {
+    CBMFileResult *r = extract("defmodule A do\n"
+                               "  def run, do: 1\n"
+                               "end\n"
+                               "defmodule B do\n"
+                               "  def run, do: 2\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "two.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_defs_named(r, "Function", "run"), 2);
+    const char *first = NULL;
+    const char *second = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->label, "Function") == 0 && strcmp(d->name, "run") == 0) {
+            if (!first) {
+                first = d->qualified_name;
+            } else {
+                second = d->qualified_name;
+            }
+        }
+    }
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(second);
+    ASSERT_TRUE(strcmp(first, second) != 0);
+    ASSERT_NOT_NULL(strstr(first, "A.run"));
+    ASSERT_NOT_NULL(strstr(second, "B.run"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A declaration naming several things (`X, Y float64`, `var a, b int`,
+ * `int a, b;`, `int x, y;`) defines every one of them, not just the first. */
+TEST(extract_go_struct_field_list_keeps_every_name) {
+    CBMFileResult *r = extract("package p\n"
+                               "type P struct {\n"
+                               "\tX, Y float64\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "p.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Field", "X"));
+    ASSERT_TRUE(has_def(r, "Field", "Y"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_go_var_list_keeps_every_name) {
+    CBMFileResult *r = extract("package p\n"
+                               "var a, b int\n"
+                               "const c, d = 1, 2\n",
+                               CBM_LANG_GO, "t", "p.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Variable", "a"));
+    ASSERT_TRUE(has_def(r, "Variable", "b"));
+    ASSERT_TRUE(has_def(r, "Variable", "c"));
+    ASSERT_TRUE(has_def(r, "Variable", "d"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_java_field_list_keeps_every_name) {
+    CBMFileResult *r = extract("class C {\n"
+                               "  int a, b;\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "C.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Field", "a"));
+    ASSERT_TRUE(has_def(r, "Field", "b"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_c_file_scope_declarator_list_keeps_every_name) {
+    CBMFileResult *r = extract("int x, y;\n"
+                               "static int *p, q = 3;\n",
+                               CBM_LANG_C, "t", "v.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Variable", "x"));
+    ASSERT_TRUE(has_def(r, "Variable", "y"));
+    ASSERT_TRUE(has_def(r, "Variable", "p"));
+    ASSERT_TRUE(has_def(r, "Variable", "q"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A comment between two decorators must not hide the route decorator above it. */
+TEST(extract_ts_route_survives_comment_between_decorators) {
+    CBMFileResult *r = extract("@Controller('auth')\n"
+                               "class C {\n"
+                               "  @Post('login')\n"
+                               "  // throttled\n"
+                               "  @Throttle({})\n"
+                               "  async login() {}\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "auth.controller.ts");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = find_def_by_name(r, "login");
+    ASSERT_NOT_NULL(d);
+    ASSERT_NOT_NULL(d->route_path);
+    ASSERT_STR_EQ(d->route_path, "/auth/login");
+    ASSERT_STR_EQ(d->route_method, "POST");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* One decorated method per class member, 20000 of them: every method used to rescan
+ * its previous siblings (ts_node_prev_sibling is O(position)), so a big class was
+ * quadratic. Both the decorator list and the route lookup are linear now. */
+TEST(extract_ts_many_decorated_methods_is_linear) {
+    enum { METHODS = 20000 };
+    const char *head = "@Controller('x')\nclass C {\n";
+    size_t sz = strlen(head) + (size_t)METHODS * 40 + 8;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    size_t off = (size_t)snprintf(src, sz, "%s", head);
+    for (int i = 0; i < METHODS; i++) {
+        off += (size_t)snprintf(src + off, sz - off, "  @Get('p%d')\n  m%d() {}\n", i, i);
+    }
+    snprintf(src + off, sz - off, "}\n");
+    uint64_t started = cbm_now_ms();
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "t", "many.controller.ts");
+    uint64_t elapsed = cbm_now_ms() - started;
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT(elapsed, 20000);
+    const CBMDefinition *last = find_def_by_name(r, "m19999");
+    ASSERT_NOT_NULL(last);
+    ASSERT_NOT_NULL(last->route_path);
+    ASSERT_STR_EQ(last->route_path, "/x/p19999");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_python_many_decorated_methods_is_linear) {
+    enum { METHODS = 20000 };
+    const char *head = "class C:\n";
+    size_t sz = strlen(head) + (size_t)METHODS * 64 + 8;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    size_t off = (size_t)snprintf(src, sz, "%s", head);
+    for (int i = 0; i < METHODS; i++) {
+        off += (size_t)snprintf(src + off, sz - off,
+                                "    @staticmethod\n    def m%d():\n        pass\n", i);
+    }
+    uint64_t started = cbm_now_ms();
+    CBMFileResult *r = extract(src, CBM_LANG_PYTHON, "t", "many.py");
+    uint64_t elapsed = cbm_now_ms() - started;
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT(elapsed, 20000);
+    const CBMDefinition *last = find_def_by_name(r, "m19999");
+    ASSERT_NOT_NULL(last);
+    ASSERT_TRUE(decorators_contain(last, "staticmethod"));
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(extraction) {
     RUN_TEST(svelte_script_found_before_many_markup_nodes);
     RUN_TEST(objectscript_udl_long_trigger_body_is_valid_json);
@@ -9574,6 +9800,17 @@ SUITE(extraction) {
     RUN_TEST(extract_walk_truncated_when_a_node_budget_is_set);
     /* Initialize extraction library */
     cbm_init();
+    RUN_TEST(extract_elixir_guarded_def_is_a_function);
+    RUN_TEST(extract_elixir_defimpl_and_defprotocol_bodies_are_walked);
+    RUN_TEST(extract_elixir_same_function_in_two_modules_has_distinct_qns);
+    RUN_TEST(extract_go_struct_field_list_keeps_every_name);
+    RUN_TEST(extract_go_var_list_keeps_every_name);
+    RUN_TEST(extract_java_field_list_keeps_every_name);
+    RUN_TEST(extract_c_file_scope_declarator_list_keeps_every_name);
+    RUN_TEST(extract_ts_route_survives_comment_between_decorators);
+    RUN_TEST(extract_ts_many_decorated_methods_is_linear);
+    RUN_TEST(extract_python_many_decorated_methods_is_linear);
+    RUN_TEST(extract_cpp_deeply_nested_template_chain_terminates);
 
     /* Wide-flat-file linearity (ms-typescript hang) */
     RUN_TEST(extract_wide_flat_file_is_linear);

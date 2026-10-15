@@ -26,7 +26,9 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
+#include "../src/foundation/platform.h"
 #include "lsp/cs_lsp.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Helpers ───────────────────────────────────────────────────── */
@@ -1226,6 +1228,145 @@ TEST(cslsp_ordinary_same_leaf_calls_join_by_exact_site) {
     PASS();
 }
 
+/* ── G2 hardening: nesting hang, receiver binding, registry arena ── */
+
+/* head + open*n + core + close*n + tail, heap-allocated (caller frees). */
+static char *cs_build_nested(const char *head, const char *open, int n, const char *core,
+                             const char *close, const char *tail) {
+    size_t ol = strlen(open), cl = strlen(close);
+    size_t len = strlen(head) + (size_t)n * (ol + cl) + strlen(core) + strlen(tail) + 1;
+    char *buf = (char *)malloc(len);
+    if (!buf)
+        return NULL;
+    char *p = buf;
+    memcpy(p, head, strlen(head));
+    p += strlen(head);
+    for (int i = 0; i < n; i++) {
+        memcpy(p, open, ol);
+        p += ol;
+    }
+    memcpy(p, core, strlen(core));
+    p += strlen(core);
+    for (int i = 0; i < n; i++) {
+        memcpy(p, close, cl);
+        p += cl;
+    }
+    memcpy(p, tail, strlen(tail));
+    p += strlen(tail);
+    *p = '\0';
+    return buf;
+}
+
+/* Drive the C# LSP entry point directly (skips the rest of extraction) and
+ * return the elapsed milliseconds. */
+static uint64_t cs_lsp_cross_ms(const char *src) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_cs_lsp_cross(&arena, src, (int)strlen(src), "test.main", NULL, 0, NULL, 0, NULL,
+                         &out);
+    uint64_t dt = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    return dt;
+}
+
+/* C1: type nesting `List<List<...>>` 100000 deep. */
+TEST(cslsp_deeply_nested_generic_type_is_bounded) {
+    char *src = cs_build_nested("class A{ ", "List<", 100000, "int", ">", " x; }\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = cs_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* C1: statement-block nesting inside a method body. */
+TEST(cslsp_deeply_nested_blocks_is_bounded) {
+    char *src = cs_build_nested("class A{ void M() ", "{", 30000, "int x = 1;", "}", " }\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = cs_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* C1: namespace / type declaration nesting. */
+TEST(cslsp_deeply_nested_namespaces_is_bounded) {
+    char *src = cs_build_nested("", "namespace N{ ", 20000, "class A{}", " }", "\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = cs_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+TEST(cslsp_deeply_nested_classes_is_bounded) {
+    char *src = cs_build_nested("", "class A{ ", 20000, "int x;", " }", "\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t ms = cs_lsp_cross_ms(src);
+    free(src);
+    ASSERT_LT(ms, 20000);
+    PASS();
+}
+
+/* C2: `_svc.Config.Get(...)` is an instance call on the Cfg-typed field, not a
+ * static call on the unrelated type App.Config that shares the last segment. */
+TEST(cslsp_dotted_receiver_not_matched_by_short_name) {
+    const char *src =
+        "namespace App { class Config { public static void Get(string s) {} } }\n"
+        "class Cfg { public void Get(string s) {} }\n"
+        "class S { public Cfg Config; }\n"
+        "class U { S _svc; void M() { _svc.Config.Get(\"x\"); } }\n";
+    CBMFileResult *r = extract_cs(src);
+    ASSERT(r);
+    ASSERT(require_resolved(r, "U.M", "Cfg.Get") >= 0);
+    ASSERT(find_resolved(r, "U.M", "App.Config.Get") < 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* C2: a local that shares a type's name takes the instance path. */
+TEST(cslsp_local_shadows_type_name_receiver) {
+    const char *src =
+        "namespace App { class Config { public static void Get(string s) {} } }\n"
+        "class Cfg { public void Get(string s) {} }\n"
+        "class U { void M() { Cfg Config = new Cfg(); Config.Get(\"x\"); } }\n";
+    CBMFileResult *r = extract_cs(src);
+    ASSERT(r);
+    ASSERT(require_resolved(r, "U.M", "Cfg.Get") >= 0);
+    ASSERT(find_resolved(r, "U.M", "App.Config.Get") < 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* C3: finalize_into must keep the method index out of the (pipeline-lifetime)
+ * registry arena, like every other index it builds. */
+TEST(cslsp_registry_finalize_into_keeps_method_index_out_of_reg_arena) {
+    CBMArena reg_arena, idx_arena;
+    cbm_arena_init(&reg_arena);
+    cbm_arena_init(&idx_arena);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &reg_arena);
+    for (int i = 0; i < 4000; i++) {
+        CBMRegisteredFunc f;
+        memset(&f, 0, sizeof(f));
+        f.qualified_name = cbm_arena_sprintf(&reg_arena, "N.T.M%d", i);
+        f.short_name = cbm_arena_sprintf(&reg_arena, "M%d", i);
+        f.receiver_type = "N.T";
+        cbm_registry_add_func(&reg, f);
+    }
+    size_t before = cbm_arena_total(&reg_arena);
+    cbm_registry_finalize_into(&reg, &idx_arena);
+    size_t grown = cbm_arena_total(&reg_arena) - before;
+    ASSERT_EQ((long)grown, 0);
+    ASSERT_NOT_NULL(cbm_registry_lookup_method(&reg, "N.T", "M17"));
+    cbm_arena_destroy(&idx_arena);
+    cbm_arena_destroy(&reg_arena);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────── */
 
 SUITE(cs_lsp) {
@@ -1290,4 +1431,12 @@ SUITE(cs_lsp) {
     RUN_TEST(cslsp_stringbuilder_chain);
     RUN_TEST(cslsp_httpclient_chain);
     RUN_TEST(cslsp_ordinary_same_leaf_calls_join_by_exact_site);
+    /* G2 hardening */
+    RUN_TEST(cslsp_deeply_nested_generic_type_is_bounded);
+    RUN_TEST(cslsp_deeply_nested_blocks_is_bounded);
+    RUN_TEST(cslsp_deeply_nested_namespaces_is_bounded);
+    RUN_TEST(cslsp_deeply_nested_classes_is_bounded);
+    RUN_TEST(cslsp_dotted_receiver_not_matched_by_short_name);
+    RUN_TEST(cslsp_local_shadows_type_name_receiver);
+    RUN_TEST(cslsp_registry_finalize_into_keeps_method_index_out_of_reg_arena);
 }

@@ -270,7 +270,15 @@ const CBMType *cbm_type_union(CBMArena *a, const CBMType **members, int count) {
         return &unknown_singleton;
 
     // Flatten: nested UNIONs unfold their members into the parent.
-    int flat_cap = count * 2 + 4;
+    // Size the buffer for every member of every nested union: a fixed count*2+4
+    // silently dropped members of `(A|..|J) | (K|..|T)`.
+    int flat_cap = 0;
+    for (int i = 0; i < count; i++) {
+        const CBMType *m = members[i];
+        flat_cap += (m && m->kind == CBM_TYPE_UNION) ? m->data.union_type.count : 1;
+    }
+    if (flat_cap <= 0)
+        return &unknown_singleton;
     const CBMType **flat = (const CBMType **)cbm_arena_alloc(a, flat_cap * sizeof(const CBMType *));
     if (!flat)
         return &unknown_singleton;

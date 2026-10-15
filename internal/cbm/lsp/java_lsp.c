@@ -43,6 +43,8 @@
 #define JAVA_LSP_MAX_EVAL_DEPTH 32
 #define JAVA_LSP_MAX_STMT_DEPTH 256
 #define JAVA_LSP_MAX_WALK_DEPTH 512
+#define JAVA_LSP_MAX_TYPE_DEPTH 128  /* nested generic/array/wildcard type nodes or text */
+#define JAVA_LSP_MAX_CLASS_DEPTH 128 /* lexically nested type declarations */
 #define JAVA_LSP_MAX_INHERIT_HOPS 32
 #define JAVA_LSP_MAX_OVERLOADS 64
 #define JAVA_LSP_BUF 1024
@@ -342,10 +344,19 @@ static void pop_enclosing_class(JavaLSPContext *ctx) {
 
 /* ── Type-AST → CBMType ───────────────────────────────────────────── */
 
-static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node);
+static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node, int depth);
+
+static const CBMType *java_parse_type_node_d(JavaLSPContext *ctx, TSNode node, int depth);
 
 const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node))
+    return java_parse_type_node_d(ctx, node, 0);
+}
+
+/* `depth` counts the nested generic / array / wildcard levels already entered:
+ * a type nested tens of thousands deep (List<List<...>>) would otherwise recurse
+ * once per level and overflow the native stack. Past the cap the type is UNKNOWN. */
+static const CBMType *java_parse_type_node_d(JavaLSPContext *ctx, TSNode node, int depth) {
+    if (ts_node_is_null(node) || depth >= JAVA_LSP_MAX_TYPE_DEPTH)
         return cbm_type_unknown();
     const char *kind = ts_node_type(node);
 
@@ -400,7 +411,7 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
         TSNode raw = ts_node_named_child(node, 0);
         TSNode targs =
             ts_node_named_child_count(node) > 1 ? ts_node_named_child(node, 1) : (TSNode){0};
-        const CBMType *base = java_parse_type_node(ctx, raw);
+        const CBMType *base = java_parse_type_node_d(ctx, raw, depth + 1);
         const char *base_qn = NULL;
         if (base && base->kind == CBM_TYPE_NAMED)
             base_qn = base->data.named.qualified_name;
@@ -412,7 +423,8 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
         if (!ts_node_is_null(targs) && strcmp(ts_node_type(targs), "type_arguments") == 0) {
             uint32_t tn = ts_node_named_child_count(targs);
             for (uint32_t ti = 0; ti < tn && arg_count < 16; ti++) {
-                arg_buf[arg_count++] = java_parse_type_node(ctx, ts_node_named_child(targs, ti));
+                arg_buf[arg_count++] =
+                    java_parse_type_node_d(ctx, ts_node_named_child(targs, ti), depth + 1);
             }
         }
         if (arg_count == 0) {
@@ -432,7 +444,7 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
         if (ts_node_is_null(elem) && ts_node_named_child_count(node) > 0) {
             elem = ts_node_named_child(node, 0);
         }
-        return cbm_type_slice(ctx->arena, java_parse_type_node(ctx, elem));
+        return cbm_type_slice(ctx->arena, java_parse_type_node_d(ctx, elem, depth + 1));
     }
 
     /* type_parameter → identifier inside; treat as a TYPE_PARAM. */
@@ -448,7 +460,7 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
     if (strcmp(kind, "wildcard") == 0) {
         uint32_t n = ts_node_named_child_count(node);
         if (n > 0)
-            return java_parse_type_node(ctx, ts_node_named_child(node, n - 1));
+            return java_parse_type_node_d(ctx, ts_node_named_child(node, n - 1), depth + 1);
         return cbm_type_unknown();
     }
 
@@ -459,14 +471,14 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
     return cbm_type_named(ctx->arena, txt);
 }
 
-static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node) {
+static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node, int depth) {
     if (ts_node_is_null(targs_node))
         return NULL;
     if (strcmp(ts_node_type(targs_node), "type_arguments") != 0)
         return NULL;
     if (ts_node_named_child_count(targs_node) == 0)
         return NULL;
-    return java_parse_type_node(ctx, ts_node_named_child(targs_node, 0));
+    return java_parse_type_node_d(ctx, ts_node_named_child(targs_node, 0), depth + 1);
 }
 
 /* ── Type-name resolution (JLS §6.5) ──────────────────────────────── */
@@ -799,6 +811,10 @@ static const CBMType *resolve_identifier_type(JavaLSPContext *ctx, const char *n
     const CBMType *t = cbm_scope_lookup(ctx->current_scope, name);
     if (t && !cbm_type_is_unknown(t))
         return t;
+    /* A local/parameter bound with an UNKNOWN type still shadows a same-named
+     * field (JLS 6.4.1): falling through would type `x` by the field `x`. */
+    if (cbm_scope_contains(ctx->current_scope, name))
+        return cbm_type_unknown();
 
     /* Enclosing-class fields, walking super chain. */
     if (ctx->enclosing_class_qn) {
@@ -1244,12 +1260,10 @@ static const CBMType *eval_ternary(JavaLSPContext *ctx, TSNode node) {
     return java_eval_expr_type(ctx, else_n);
 }
 
-static bool is_string_concat(JavaLSPContext *ctx, TSNode node) {
-    /* Either operand of type java.lang.String makes the whole expr a String. */
-    TSNode lhs = ts_node_child_by_field_name(node, "left", 4);
-    TSNode rhs = ts_node_child_by_field_name(node, "right", 5);
-    const CBMType *l = java_eval_expr_type(ctx, lhs);
-    const CBMType *r = java_eval_expr_type(ctx, rhs);
+static bool is_string_concat(const CBMType *l, const CBMType *r) {
+    /* Either operand of type java.lang.String makes the whole expr a String.
+     * The caller evaluates each operand exactly once and passes the types in:
+     * re-evaluating the left operand here made a chain of n `+` cost 2^n. */
     if (l && l->kind == CBM_TYPE_NAMED &&
         strcmp(l->data.named.qualified_name, "java.lang.String") == 0)
         return true;
@@ -1279,12 +1293,16 @@ static const CBMType *eval_binary(JavaLSPContext *ctx, TSNode node) {
         strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
         return cbm_type_builtin(ctx->arena, "boolean");
     }
-    if (strcmp(op, "+") == 0 && is_string_concat(ctx, node)) {
-        return cbm_type_named(ctx->arena, "java.lang.String");
+    TSNode lhs = ts_node_child_by_field_name(node, "left", 4);
+    const CBMType *l = java_eval_expr_type(ctx, lhs);
+    if (strcmp(op, "+") == 0) {
+        TSNode rhs = ts_node_child_by_field_name(node, "right", 5);
+        const CBMType *r = java_eval_expr_type(ctx, rhs);
+        if (is_string_concat(l, r))
+            return cbm_type_named(ctx->arena, "java.lang.String");
     }
     /* Numeric promotion — keep LHS for simplicity. */
-    TSNode lhs = ts_node_child_by_field_name(node, "left", 4);
-    return java_eval_expr_type(ctx, lhs);
+    return l;
 }
 
 static const CBMType *eval_unary(JavaLSPContext *ctx, TSNode node) {
@@ -1462,7 +1480,11 @@ static void process_block(JavaLSPContext *ctx, TSNode node) {
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
         TSNode c = ts_node_named_child(node, i);
-        java_process_statement(ctx, c);
+        /* A nested bare block is processed by java_resolve_calls_in_node (it
+         * routes the block back through java_process_statement). Processing it
+         * here as well walked every nesting level twice: 2^depth work. */
+        if (strcmp(ts_node_type(c), "block") != 0)
+            java_process_statement(ctx, c);
         java_resolve_calls_in_node(ctx, c);
     }
     ctx->current_scope = saved;
@@ -1651,6 +1673,10 @@ static TSNode java_type_declaration_body(TSNode node) {
 }
 
 static void java_process_class_decl(JavaLSPContext *ctx, TSNode node) {
+    /* Type declarations nest by recursion (and each level's QN grows with the
+     * depth): stop descending past a depth no real source reaches. */
+    if (ctx->enclosing_class_depth >= JAVA_LSP_MAX_CLASS_DEPTH)
+        return;
     TSNode name_node = ts_node_child_by_field_name(node, "name", 4);
     if (ts_node_is_null(name_node))
         return;
@@ -3064,9 +3090,11 @@ static const char **split_generic_args(CBMArena *a, const char *inside, int *out
  * Preserves generic template arguments: "Consumer<String>" parses to a
  * TEMPLATE("java.util.function.Consumer", [String]) so the SAM-binder
  * downstream can substitute the lambda's parameter type correctly. */
-static const CBMType *parse_param_text_full(CBMArena *a, const char *text, const char *parent_class,
-                                            const char *module_qn, const CBMTypeRegistry *reg) {
-    if (!text)
+static const CBMType *parse_param_text_depth(CBMArena *a, const char *text,
+                                             const char *parent_class, const char *module_qn,
+                                             const CBMTypeRegistry *reg, int depth) {
+    /* Generic arguments recurse once per nesting level; cap it like the node form. */
+    if (!text || depth >= JAVA_LSP_MAX_TYPE_DEPTH)
         return cbm_type_unknown();
     int dim = 0;
     const char *no_arr = unwrap_array_text(a, text, &dim);
@@ -3161,7 +3189,8 @@ static const CBMType *parse_param_text_full(CBMArena *a, const char *text, const
             const CBMType **gargs =
                 (const CBMType **)cbm_arena_alloc(a, (size_t)(gc + 1) * sizeof(*gargs));
             for (int i = 0; i < gc; i++) {
-                gargs[i] = parse_param_text_full(a, arg_strs[i], parent_class, module_qn, reg);
+                gargs[i] =
+                    parse_param_text_depth(a, arg_strs[i], parent_class, module_qn, reg, depth + 1);
             }
             gargs[gc] = NULL;
             base = cbm_type_template(a, base->data.named.qualified_name, gargs, gc);
@@ -3170,6 +3199,11 @@ static const CBMType *parse_param_text_full(CBMArena *a, const char *text, const
     while (dim-- > 0)
         base = cbm_type_slice(a, base);
     return base;
+}
+
+static const CBMType *parse_param_text_full(CBMArena *a, const char *text, const char *parent_class,
+                                            const char *module_qn, const CBMTypeRegistry *reg) {
+    return parse_param_text_depth(a, text, parent_class, module_qn, reg, 0);
 }
 
 /* Backwards-compatible wrapper for callers that don't know the parent_class
@@ -3511,7 +3545,7 @@ static void patch_one_method(JavaLSPContext *ctx, CBMTypeRegistry *reg, TSNode m
 
 static void patch_method_signatures_from_ast(JavaLSPContext *ctx, CBMTypeRegistry *reg,
                                              TSNode class_node, const char *enclosing_class_qn) {
-    if (ts_node_is_null(class_node))
+    if (ts_node_is_null(class_node) || ctx->enclosing_class_depth >= JAVA_LSP_MAX_CLASS_DEPTH)
         return;
     const char *kind = ts_node_type(class_node);
     if (strcmp(kind, "class_declaration") != 0 && strcmp(kind, "interface_declaration") != 0 &&
@@ -3604,7 +3638,7 @@ static void append_field_to_class(CBMTypeRegistry *reg, CBMArena *a, const char 
  * field arrays. Recurses into nested type declarations. */
 static void populate_class_fields_from_ast(JavaLSPContext *ctx, CBMTypeRegistry *reg,
                                            TSNode class_node, const char *enclosing_class_qn) {
-    if (ts_node_is_null(class_node))
+    if (ts_node_is_null(class_node) || ctx->enclosing_class_depth >= JAVA_LSP_MAX_CLASS_DEPTH)
         return;
     const char *kind = ts_node_type(class_node);
     if (strcmp(kind, "class_declaration") != 0 && strcmp(kind, "interface_declaration") != 0 &&

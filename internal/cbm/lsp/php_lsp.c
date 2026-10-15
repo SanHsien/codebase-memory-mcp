@@ -790,25 +790,10 @@ static void bind_phpdoc_var(PHPLSPContext *ctx, const char *docstring) {
 /* Walk siblings backwards from `node` to find a leading PHPDoc comment
  * ("/**...*​/"). Returns cleaned doc text or NULL. */
 static char *fetch_leading_phpdoc(PHPLSPContext *ctx, TSNode node) {
-    TSNode parent = ts_node_parent(node);
-    if (ts_node_is_null(parent))
-        return NULL;
-    uint32_t nc = ts_node_child_count(parent);
-    /* Find index of node within parent. */
-    int idx = -1;
-    for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = ts_node_child(parent, i);
-        if (ts_node_eq(c, node)) {
-            idx = (int)i;
-            break;
-        }
-    }
-    if (idx <= 0)
-        return NULL;
-    for (int i = idx - 1; i >= 0; i--) {
-        TSNode c = ts_node_child(parent, (uint32_t)i);
-        if (ts_node_is_null(c))
-            continue;
+    /* Step back through the previous siblings directly: locating `node` by
+     * scanning parent children from index 0 (ts_node_child is O(i)) made this
+     * O(idx^2) per call, i.e. cubic over a class with many members. */
+    for (TSNode c = ts_node_prev_sibling(node); !ts_node_is_null(c); c = ts_node_prev_sibling(c)) {
         const char *k = ts_node_type(c);
         if (strcmp(k, "comment") == 0) {
             char *raw = php_node_text(ctx, c);
@@ -1351,8 +1336,14 @@ static bool php_callable_reference_has_dynamic_member_name(PHPLSPContext *ctx, T
 /* Mirror extract_calls.c's terminal_callee_leaf policy so the PHP LSP and
  * USAGE passes attach the same exact token occurrence to a first-class
  * callable, including qualified free-function references. */
+static TSNode php_reference_callee_leaf_nested(PHPLSPContext *ctx, TSNode expr, int nest);
 static TSNode php_reference_callee_leaf(PHPLSPContext *ctx, TSNode expr) {
-    if (ts_node_is_null(expr) || php_dynamic_reference_expr(ctx, expr)) {
+    return php_reference_callee_leaf_nested(ctx, expr, 0);
+}
+
+static TSNode php_reference_callee_leaf_nested(PHPLSPContext *ctx, TSNode expr, int nest) {
+    if (ts_node_is_null(expr) || nest >= cbm_lsp_max_walk_depth() ||
+        php_dynamic_reference_expr(ctx, expr)) {
         return (TSNode){0};
     }
 
@@ -1362,7 +1353,7 @@ static TSNode php_reference_callee_leaf(PHPLSPContext *ctx, TSNode expr) {
         TSNode terminal = ts_node_child_by_field_name(expr, terminal_fields[i],
                                                       (uint32_t)strlen(terminal_fields[i]));
         if (!ts_node_is_null(terminal)) {
-            return php_reference_callee_leaf(ctx, terminal);
+            return php_reference_callee_leaf_nested(ctx, terminal, nest + 1);
         }
     }
 
@@ -1383,8 +1374,8 @@ static TSNode php_reference_callee_leaf(PHPLSPContext *ctx, TSNode expr) {
     bool terminal_is_last = strstr(kind, "qualified") || strstr(kind, "scoped") ||
                             strstr(kind, "member") || strstr(kind, "selector") ||
                             strstr(kind, "navigation") || strstr(kind, "field_expression");
-    return php_reference_callee_leaf(ctx,
-                                     ts_node_named_child(expr, terminal_is_last ? count - 1 : 0));
+    return php_reference_callee_leaf_nested(
+        ctx, ts_node_named_child(expr, terminal_is_last ? count - 1 : 0), nest + 1);
 }
 
 static TSNode php_callable_reference_leaf(PHPLSPContext *ctx, TSNode call, const char *kind) {
@@ -1857,8 +1848,13 @@ static const char *is_func_to_builtin(const char *name) {
  * only takes a single php_narrowing_t. To support full conjunction we
  * additionally call parse_narrowing_collect which writes into a small
  * array. parse_narrowing itself returns the FIRST narrowing it finds. */
+static int parse_narrowing_collect_nested(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out,
+                                          int max_out, int nest);
+
 static int parse_narrowing_collect(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out,
-                                   int max_out);
+                                   int max_out) {
+    return parse_narrowing_collect_nested(ctx, cond, out, max_out, 0);
+}
 
 static bool parse_narrowing(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out) {
     php_narrowing_t buf[1] = {{0}};
@@ -1874,22 +1870,30 @@ static bool parse_narrowing(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *ou
  * up to max_out. Returns the number filled. */
 static int parse_narrowing_one(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out);
 
-static int parse_narrowing_collect(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out,
-                                   int max_out) {
-    if (ts_node_is_null(cond) || max_out <= 0)
+static int parse_narrowing_collect_nested(PHPLSPContext *ctx, TSNode cond, php_narrowing_t *out,
+                                          int max_out, int nest) {
+    /* `a && b && c ...` is left-nested, so a long chain recurses once per
+     * operand; past the walk-depth cap the rest of the chain is not narrowed. */
+    if (ts_node_is_null(cond) || max_out <= 0 || nest >= cbm_lsp_max_walk_depth())
         return 0;
     const char *kind = ts_node_type(cond);
 
-    /* Parenthesized: unwrap. */
-    if (strcmp(kind, "parenthesized_expression") == 0) {
+    /* Parenthesized: unwrap (iteratively; the nesting is attacker-controlled). */
+    while (strcmp(kind, "parenthesized_expression") == 0) {
+        TSNode inner;
+        memset(&inner, 0, sizeof(inner));
         uint32_t nc = ts_node_child_count(cond);
         for (uint32_t i = 0; i < nc; i++) {
             TSNode c = ts_node_child(cond, i);
             if (!ts_node_is_null(c) && ts_node_is_named(c)) {
-                return parse_narrowing_collect(ctx, c, out, max_out);
+                inner = c;
+                break;
             }
         }
-        return 0;
+        if (ts_node_is_null(inner))
+            return 0;
+        cond = inner;
+        kind = ts_node_type(cond);
     }
 
     /* Conjunction `A && B` (or `A and B`) → recurse into both sides. */
@@ -1899,8 +1903,8 @@ static int parse_narrowing_collect(PHPLSPContext *ctx, TSNode cond, php_narrowin
         if (opt && (strcmp(opt, "&&") == 0 || strcmp(opt, "and") == 0)) {
             TSNode left = ts_node_child_by_field_name(cond, "left", 4);
             TSNode right = ts_node_child_by_field_name(cond, "right", 5);
-            int got = parse_narrowing_collect(ctx, left, out, max_out);
-            got += parse_narrowing_collect(ctx, right, out + got, max_out - got);
+            int got = parse_narrowing_collect_nested(ctx, left, out, max_out, nest + 1);
+            got += parse_narrowing_collect_nested(ctx, right, out + got, max_out - got, nest + 1);
             return got;
         }
     }
@@ -1918,15 +1922,21 @@ static int parse_narrowing_one(PHPLSPContext *ctx, TSNode cond, php_narrowing_t 
     if (ts_node_is_null(cond))
         return 0;
     const char *kind = ts_node_type(cond);
-    if (strcmp(kind, "parenthesized_expression") == 0) {
+    while (strcmp(kind, "parenthesized_expression") == 0) {
+        TSNode inner;
+        memset(&inner, 0, sizeof(inner));
         uint32_t nc = ts_node_child_count(cond);
         for (uint32_t i = 0; i < nc; i++) {
             TSNode c = ts_node_child(cond, i);
             if (!ts_node_is_null(c) && ts_node_is_named(c)) {
-                return parse_narrowing_one(ctx, c, out);
+                inner = c;
+                break;
             }
         }
-        return 0;
+        if (ts_node_is_null(inner))
+            return 0;
+        cond = inner;
+        kind = ts_node_type(cond);
     }
 
     /* `$x instanceof Foo` — emitted as binary_expression with operator
@@ -2128,8 +2138,13 @@ static void walk_with_narrowing(PHPLSPContext *ctx, TSNode body, const php_narro
  *   break (in a loop). For our purposes any of these means the rest of the
  * enclosing function does NOT execute the inner narrowed-out branch, so we
  * can apply the negation of the inner branch as sequential narrowing. */
+static bool stmt_is_terminator_nested(TSNode stmt, int nest);
 static bool stmt_is_terminator(TSNode stmt) {
-    if (ts_node_is_null(stmt))
+    return stmt_is_terminator_nested(stmt, 0);
+}
+
+static bool stmt_is_terminator_nested(TSNode stmt, int nest) {
+    if (ts_node_is_null(stmt) || nest >= cbm_lsp_max_walk_depth())
         return false;
     const char *k = ts_node_type(stmt);
     if (strcmp(k, "return_statement") == 0)
@@ -2145,7 +2160,7 @@ static bool stmt_is_terminator(TSNode stmt) {
                 last = c;
         }
         if (!ts_node_is_null(last))
-            return stmt_is_terminator(last);
+            return stmt_is_terminator_nested(last, nest + 1);
     }
     if (strcmp(k, "expression_statement") == 0) {
         uint32_t nc = ts_node_child_count(stmt);
@@ -2306,6 +2321,33 @@ static void process_if_statement(PHPLSPContext *ctx, TSNode node) {
     }
 }
 
+/* Recurse into the children of `node` via a cursor (O(n)); ts_node_child(node,i) is O(i) → O(n²)
+ * on a wide node. A non-null `skip` subtree was already walked by the caller and is not walked
+ * again; it is only ever a direct child or a child of an arguments/argument wrapper. */
+static void php_walk_children_skipping(PHPLSPContext *ctx, TSNode node, TSNode skip) {
+    bool have_skip = !ts_node_is_null(skip);
+    TSTreeCursor cursor = ts_tree_cursor_new(node);
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        do {
+            TSNode c = ts_tree_cursor_current_node(&cursor);
+            if (have_skip) {
+                if (ts_node_eq(c, skip))
+                    continue;
+                if (ts_node_start_byte(c) <= ts_node_start_byte(skip) &&
+                    ts_node_end_byte(skip) <= ts_node_end_byte(c)) {
+                    const char *ck = ts_node_type(c);
+                    if (strcmp(ck, "arguments") == 0 || strcmp(ck, "argument") == 0) {
+                        php_walk_children_skipping(ctx, c, skip);
+                        continue;
+                    }
+                }
+            }
+            php_resolve_calls_in_node(ctx, c);
+        } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+}
+
 /* Walk a subtree, binding scope and resolving calls. */
 static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
@@ -2346,6 +2388,11 @@ static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
     bool is_callable_reference = php_is_first_class_callable(node);
     CBMResolvedKind resolved_kind =
         is_callable_reference ? CBM_RESOLVED_CALL_REFERENCE : CBM_RESOLVED_INVOCATION;
+    /* Closure literal already walked (with $this rebound) by the bindTo/bind
+     * branches below; the generic child recursion must not walk it again, or
+     * nested bind chains cost O(2^depth). */
+    TSNode walked_closure;
+    memset(&walked_closure, 0, sizeof(walked_closure));
     if (strcmp(kind, "function_call_expression") == 0) {
         int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
         resolve_function_call(ctx, node, resolved_kind);
@@ -2405,6 +2452,7 @@ static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
                             ctx->enclosing_class_qn = t->data.named.qualified_name;
                             php_resolve_calls_in_node(ctx, obj);
                             ctx->enclosing_class_qn = saved;
+                            walked_closure = obj;
                         }
                         break;
                     }
@@ -2469,6 +2517,7 @@ static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
                                 ctx->enclosing_class_qn = t->data.named.qualified_name;
                                 php_resolve_calls_in_node(ctx, closure_arg);
                                 ctx->enclosing_class_qn = saved;
+                                walked_closure = closure_arg;
                             }
                         }
                     }
@@ -2477,16 +2526,7 @@ static void php_resolve_calls_in_node_inner(PHPLSPContext *ctx, TSNode node) {
         }
     }
 
-    /* Recurse via a cursor (O(n)); ts_node_child(node,i) is O(i) → O(n²) on a wide node. */
-    {
-        TSTreeCursor cursor = ts_tree_cursor_new(node);
-        if (ts_tree_cursor_goto_first_child(&cursor)) {
-            do {
-                php_resolve_calls_in_node(ctx, ts_tree_cursor_current_node(&cursor));
-            } while (ts_tree_cursor_goto_next_sibling(&cursor));
-        }
-        ts_tree_cursor_delete(&cursor);
-    }
+    php_walk_children_skipping(ctx, node, walked_closure);
 }
 
 /* ── function-like processing ───────────────────────────────────── */
@@ -4142,8 +4182,13 @@ static void php_lsp_collect_class_fields(PHPLSPContext *ctx, CBMTypeRegistry *re
      * Pass 2: classes and enums (which may `use Trait;` and need the
      * trait's signatures already patched).
      */
+    /* Growable stack: a fixed 256-entry array silently dropped every class
+     * after the 256th node of a wide file. */
+    int stack_cap = 256;
+    TSNode *stack = (TSNode *)malloc((size_t)stack_cap * sizeof(TSNode));
+    if (!stack)
+        return;
     for (int pass = 0; pass < 2; pass++) {
-        TSNode stack[256];
         int top = 0;
         stack[top++] = root;
         while (top > 0) {
@@ -4158,14 +4203,30 @@ static void php_lsp_collect_class_fields(PHPLSPContext *ctx, CBMTypeRegistry *re
             if ((pass == 0 && is_trait_or_iface) || (pass == 1 && is_class_or_enum)) {
                 process_class_for_fields(ctx, reg, n, tab);
             }
-            uint32_t nc = ts_node_child_count(n);
-            for (uint32_t i = 0; i < nc && top < 256; i++) {
-                TSNode c = ts_node_child(n, i);
-                if (!ts_node_is_null(c) && ts_node_is_named(c))
-                    stack[top++] = c;
+            uint32_t nc = ts_node_named_child_count(n);
+            if (top + (int)nc > stack_cap) {
+                int new_cap = stack_cap;
+                while (top + (int)nc > new_cap)
+                    new_cap *= 2;
+                TSNode *grown = (TSNode *)realloc(stack, (size_t)new_cap * sizeof(TSNode));
+                if (!grown)
+                    continue; /* OOM: skip this node's children, keep what we have */
+                stack = grown;
+                stack_cap = new_cap;
             }
+            /* Cursor walk: ts_node_named_child(n, i) is O(i) -> O(n^2) on a wide node. */
+            TSTreeCursor cur = ts_tree_cursor_new(n);
+            if (ts_tree_cursor_goto_first_child(&cur)) {
+                do {
+                    TSNode c = ts_tree_cursor_current_node(&cur);
+                    if (ts_node_is_named(c) && top < stack_cap)
+                        stack[top++] = c;
+                } while (ts_tree_cursor_goto_next_sibling(&cur));
+            }
+            ts_tree_cursor_delete(&cur);
         }
     }
+    free(stack);
 }
 
 void cbm_php_refine_lsp_registry(PHPLSPContext *ctx, CBMTypeRegistry *reg, TSNode root) {

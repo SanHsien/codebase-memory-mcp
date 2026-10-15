@@ -65,14 +65,51 @@ static int is_string_like(const char *kind) {
             strcmp(kind, "line_string_literal") == 0);
 }
 
+/* Locate the content of a string literal.  Skips a Python/Rust style prefix
+ * (r, b, u, f and two-letter combinations such as br, rb, fr) and Rust raw
+ * '#' fences, then removes one delimiter pair: ", ' or ` (Go/JS raw strings),
+ * tripled for Python """x""".  A prefix only counts when a quote follows it.
+ * Returns false when `text` is not a delimited literal. */
+static bool string_literal_span(const char *text, size_t len, size_t *off, size_t *out_len) {
+    enum { MAX_PREFIX = 2, TRIPLE = 3 };
+    size_t i = 0;
+    while (i < MAX_PREFIX && i < len && strchr("rRbBuUfF", text[i]) != NULL) {
+        i++;
+    }
+    size_t hashes = 0;
+    if (i > 0) {
+        while (i + hashes < len && text[i + hashes] == '#') {
+            hashes++;
+        }
+    }
+    size_t q = i + hashes;
+    if (q >= len || (text[q] != '"' && text[q] != '\'' && text[q] != '`')) {
+        return false;
+    }
+    char quote = text[q];
+    size_t dl = 1;
+    if (q + (TRIPLE * 2) + hashes <= len && text[q + 1] == quote && text[q + 2] == quote &&
+        text[len - hashes - 1] == quote && text[len - hashes - 2] == quote &&
+        text[len - hashes - TRIPLE] == quote) {
+        dl = TRIPLE;
+    }
+    if (len < q + (dl * 2) + hashes) {
+        return false;
+    }
+    *off = q + dl;
+    *out_len = len - *off - dl - hashes;
+    return true;
+}
+
 /* Strip surrounding quotes from a string, return arena-allocated copy */
 static const char *strip_quotes(CBMArena *a, const char *text) {
     if (!text || !text[0]) {
         return NULL;
     }
-    int len = (int)strlen(text);
-    if (len >= CBM_QUOTE_PAIR && (text[0] == '"' || text[0] == '\'')) {
-        return cbm_arena_strndup(a, text + CBM_QUOTE_OFFSET, (size_t)(len - CBM_QUOTE_PAIR));
+    size_t off = 0;
+    size_t n = 0;
+    if (string_literal_span(text, strlen(text), &off, &n)) {
+        return cbm_arena_strndup(a, text + off, n);
     }
     return text;
 }
@@ -96,7 +133,8 @@ const char **cbm_string_dispatch_suffixes(CBMLanguage lang) {
 }
 
 // Forward declarations
-static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang);
+static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang,
+                                 WalkState *state);
 static char *gotemplate_callee(CBMArena *a, TSNode node, const char *source);
 static const char *strip_and_validate_string_arg(CBMArena *a, char *text);
 
@@ -267,6 +305,30 @@ static TSNode unwrap_await_callee(TSNode node) {
     return ts_node_named_child(node, 0);
 }
 
+/* Callee/receiver text.  A member-call chain (a.m().m()...) makes every call's
+ * func/receiver node span the whole chain before it, so copying that text is
+ * O(chain length) per call and O(N^2) per file.  Past CALLEE_TEXT_MAX bytes
+ * keep only the terminal identifier (the resolvable name); NULL when the text
+ * does not end in one, so callers fall back to the bare method name. */
+enum { CALLEE_TEXT_MAX = 512 };
+
+static char *callee_node_text(CBMArena *a, TSNode node, const char *source) {
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    if (end <= start || end - start <= CALLEE_TEXT_MAX) {
+        return cbm_node_text(a, node, source);
+    }
+    uint32_t i = end;
+    while (i > start && (isalnum((unsigned char)source[i - 1]) || source[i - 1] == '_' ||
+                         source[i - 1] == '$' || (unsigned char)source[i - 1] >= 0x80)) {
+        i--;
+    }
+    if (i == end) {
+        return NULL;
+    }
+    return cbm_arena_strndup(a, source + i, end - i);
+}
+
 static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *source) {
     // Try "function" field
     TSNode func_node = ts_node_child_by_field_name(node, TS_FIELD("function"));
@@ -285,7 +347,7 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
             /* ReScript: call_expression `function` field is a value_identifier
              * (or value_identifier_path for module-qualified calls). */
             strcmp(fk, "value_identifier") == 0 || strcmp(fk, "value_identifier_path") == 0) {
-            return cbm_node_text(a, func_node, source);
+            return callee_node_text(a, func_node, source);
         }
         // C++ explicit template call f<T>(args): the `function` field is a
         // template_function whose `name` child is the bare callee (identifier
@@ -324,7 +386,7 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
         char *name = cbm_node_text(a, name_node, source);
         TSNode obj = ts_node_child_by_field_name(node, TS_FIELD("object"));
         if (!ts_node_is_null(obj) && name) {
-            char *obj_text = cbm_node_text(a, obj, source);
+            char *obj_text = callee_node_text(a, obj, source);
             if (obj_text && obj_text[0]) {
                 return cbm_arena_sprintf(a, "%s.%s", obj_text, name);
             }
@@ -338,7 +400,7 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
         char *method = cbm_node_text(a, method_node, source);
         TSNode recv = ts_node_child_by_field_name(node, TS_FIELD("receiver"));
         if (!ts_node_is_null(recv) && method) {
-            char *recv_text = cbm_node_text(a, recv, source);
+            char *recv_text = callee_node_text(a, recv, source);
             if (recv_text && recv_text[0]) {
                 return cbm_arena_sprintf(a, "%s.%s", recv_text, method);
             }
@@ -614,14 +676,55 @@ static bool lisp_definition_head(CBMLanguage lang, TSNode head, const char *sour
                                                          : clojure_scheme_racket_heads);
 }
 
-static bool lisp_list_is_definition_role(CBMLanguage lang, TSNode node, const char *source) {
+/* Ancestor iteration for the definition-role checks.  ts_node_parent answers by
+ * descending from the ROOT, so one call is O(depth); a call per hop made deeply
+ * nested code (f (f (f ...))) cubic.  While the unified walk is on `node`, climb
+ * a scratch copy of the walk cursor instead (O(1) per hop); callers outside the
+ * walk keep the node-based climb. */
+typedef struct {
+    TSTreeCursor *cursor;
+    TSNode cur;
+} CallAncestors;
+
+static TSNode call_ancestors_next(CallAncestors *it) {
+    if (it->cursor) {
+        return ts_tree_cursor_goto_parent(it->cursor) ? ts_tree_cursor_current_node(it->cursor)
+                                                      : (TSNode){0};
+    }
+    it->cur = ts_node_parent(it->cur);
+    return it->cur;
+}
+
+static TSNode call_ancestors_begin(CallAncestors *it, WalkState *state, TSNode node) {
+    it->cursor = NULL;
+    it->cur = node;
+    if (state && state->current_cursor && state->occurrence_cursor &&
+        ts_node_eq(ts_tree_cursor_current_node(state->current_cursor), node)) {
+        ts_tree_cursor_reset_to(state->occurrence_cursor, state->current_cursor);
+        it->cursor = state->occurrence_cursor;
+    }
+    return call_ancestors_next(it);
+}
+
+/* The definition-role checks below look for an enclosing definition whose head, signature
+ * or pattern contains the call.  Such a container is always within a few levels of the
+ * call; deeper ancestors are body code.  ts_node_parent is itself O(depth), so an
+ * unbounded climb per call made deeply nested code cubic (5000 nested Clojure calls
+ * hung the indexer). */
+enum { CALL_ROLE_MAX_HOPS = 32 };
+
+static bool lisp_list_is_definition_role(CBMLanguage lang, TSNode node, const char *source,
+                                         WalkState *state) {
     uint32_t count = ts_node_named_child_count(node);
     if (count > 0 && lisp_definition_head(lang, ts_node_named_child(node, 0), source)) {
         return true;
     }
 
-    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
-         parent = ts_node_parent(parent)) {
+    int hops = 0;
+    CallAncestors anc;
+    for (TSNode parent = call_ancestors_begin(&anc, state, node);
+         !ts_node_is_null(parent) && hops++ < CALL_ROLE_MAX_HOPS;
+         parent = call_ancestors_next(&anc)) {
         const char *parent_kind = ts_node_type(parent);
         if (lang == CBM_LANG_COMMONLISP &&
             (strcmp(parent_kind, "defun_header") == 0 || strcmp(parent_kind, "lambda_list") == 0)) {
@@ -653,9 +756,12 @@ static bool call_node_has_direct_token(TSNode node, const char *token) {
     return false;
 }
 
-static bool julia_call_is_definition_head(TSNode node) {
-    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
-         parent = ts_node_parent(parent)) {
+static bool julia_call_is_definition_head(TSNode node, WalkState *state) {
+    int hops = 0;
+    CallAncestors anc;
+    for (TSNode parent = call_ancestors_begin(&anc, state, node);
+         !ts_node_is_null(parent) && hops++ < CALL_ROLE_MAX_HOPS;
+         parent = call_ancestors_next(&anc)) {
         const char *kind = ts_node_type(parent);
         if (strcmp(kind, "assignment") == 0 || strcmp(kind, "function_definition") == 0 ||
             strcmp(kind, "short_function_definition") == 0) {
@@ -666,9 +772,12 @@ static bool julia_call_is_definition_head(TSNode node) {
     return false;
 }
 
-static bool typst_call_is_let_pattern(TSNode node) {
-    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
-         parent = ts_node_parent(parent)) {
+static bool typst_call_is_let_pattern(TSNode node, WalkState *state) {
+    int hops = 0;
+    CallAncestors anc;
+    for (TSNode parent = call_ancestors_begin(&anc, state, node);
+         !ts_node_is_null(parent) && hops++ < CALL_ROLE_MAX_HOPS;
+         parent = call_ancestors_next(&anc)) {
         if (strcmp(ts_node_type(parent), "let") == 0) {
             TSNode pattern = ts_node_child_by_field_name(parent, TS_FIELD("pattern"));
             return call_node_contains(pattern, node);
@@ -677,9 +786,12 @@ static bool typst_call_is_let_pattern(TSNode node) {
     return false;
 }
 
-static bool agda_expr_is_definition_role(TSNode node) {
-    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
-         parent = ts_node_parent(parent)) {
+static bool agda_expr_is_definition_role(TSNode node, WalkState *state) {
+    int hops = 0;
+    CallAncestors anc;
+    for (TSNode parent = call_ancestors_begin(&anc, state, node);
+         !ts_node_is_null(parent) && hops++ < CALL_ROLE_MAX_HOPS;
+         parent = call_ancestors_next(&anc)) {
         const char *kind = ts_node_type(parent);
         if (strcmp(kind, "lhs") == 0 || strcmp(kind, "typed_binding") == 0 ||
             strcmp(kind, "signature") == 0 || strcmp(kind, "type_signature") == 0 ||
@@ -709,15 +821,18 @@ static bool elixir_call_head_in(TSNode call, const char *source, const char *con
            call_node_text_in(ts_node_child(call, 0), source, heads);
 }
 
-static bool elixir_call_is_definition_role(TSNode node, const char *source) {
+static bool elixir_call_is_definition_role(TSNode node, const char *source, WalkState *state) {
     static const char *const structural_heads[] = {"def", "defp", "defmacro", "defmodule", NULL};
     static const char *const function_heads[] = {"def", "defp", "defmacro", NULL};
     if (elixir_call_head_in(node, source, structural_heads)) {
         return true;
     }
 
-    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
-         parent = ts_node_parent(parent)) {
+    int hops = 0;
+    CallAncestors anc;
+    for (TSNode parent = call_ancestors_begin(&anc, state, node);
+         !ts_node_is_null(parent) && hops++ < CALL_ROLE_MAX_HOPS;
+         parent = call_ancestors_next(&anc)) {
         if (strcmp(ts_node_type(parent), "call") != 0 ||
             !elixir_call_head_in(parent, source, function_heads)) {
             continue;
@@ -731,25 +846,26 @@ static bool elixir_call_is_definition_role(TSNode node, const char *source) {
     return false;
 }
 
-static bool call_node_is_definition_container(CBMLanguage lang, TSNode node, const char *source) {
+static bool call_node_is_definition_container(CBMLanguage lang, TSNode node, const char *source,
+                                              WalkState *state) {
     const char *kind = ts_node_type(node);
     if ((lang == CBM_LANG_CLOJURE || lang == CBM_LANG_SCHEME || lang == CBM_LANG_RACKET ||
          lang == CBM_LANG_COMMONLISP || lang == CBM_LANG_EMACSLISP) &&
         (strcmp(kind, "list") == 0 || strcmp(kind, "list_lit") == 0)) {
-        return lisp_list_is_definition_role(lang, node, source);
+        return lisp_list_is_definition_role(lang, node, source, state);
     }
     if (lang == CBM_LANG_JULIA &&
         (strcmp(kind, "call_expression") == 0 || strcmp(kind, "broadcast_call_expression") == 0)) {
-        return julia_call_is_definition_head(node);
+        return julia_call_is_definition_head(node, state);
     }
     if (lang == CBM_LANG_TYPST && strcmp(kind, "call") == 0) {
-        return typst_call_is_let_pattern(node);
+        return typst_call_is_let_pattern(node, state);
     }
     if (lang == CBM_LANG_AGDA && strcmp(kind, "expr") == 0) {
-        return agda_expr_is_definition_role(node);
+        return agda_expr_is_definition_role(node, state);
     }
     return lang == CBM_LANG_ELIXIR && strcmp(kind, "call") == 0 &&
-           elixir_call_is_definition_role(node, source);
+           elixir_call_is_definition_role(node, source, state);
 }
 
 // Lisp dialects: a call is a list (`list` / `list_lit`) whose head (first named
@@ -1853,8 +1969,9 @@ static bool is_nested_verilog_call_wrapper(CBMLanguage lang, TSNode node) {
            strcmp(ts_node_type(parent), "function_subroutine_call") == 0;
 }
 
-static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang) {
-    if (call_node_is_definition_container(lang, node, source)) {
+static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang,
+                                 WalkState *state) {
+    if (call_node_is_definition_container(lang, node, source, state)) {
         return NULL;
     }
     if (is_nested_verilog_call_wrapper(lang, node)) {
@@ -1966,9 +2083,11 @@ static const char *strip_and_validate_string_arg(CBMArena *a, char *text) {
         return NULL;
     }
     int len = (int)strlen(text);
-    if (len >= CBM_QUOTE_PAIR && (text[0] == '"' || text[0] == '\'')) {
-        text = cbm_arena_strndup(a, text + CBM_QUOTE_OFFSET, (size_t)(len - CBM_QUOTE_PAIR));
-        len -= CBM_QUOTE_PAIR;
+    size_t off = 0;
+    size_t n = 0;
+    if (string_literal_span(text, (size_t)len, &off, &n)) {
+        text = cbm_arena_strndup(a, text + off, n);
+        len = (int)n;
     }
     if (!text || len <= 0 || len >= MAX_STRING_ARG_LEN) {
         return NULL;
@@ -3706,7 +3825,7 @@ static TSNode language_specific_callee_leaf(CBMLanguage language, TSNode expr,
 static CBMPrimaryCalleeSelection select_primary_callee(CBMExtractCtx *ctx, TSNode node,
                                                        WalkState *state) {
     CBMPrimaryCalleeSelection selection = {0};
-    selection.name = extract_callee_name(ctx->arena, node, ctx->source, ctx->language);
+    selection.name = extract_callee_name(ctx->arena, node, ctx->source, ctx->language, state);
     selection.name = resolve_objectscript_callee(ctx, node, state, selection.name);
     if (!selection.name || !selection.name[0]) {
         return selection;

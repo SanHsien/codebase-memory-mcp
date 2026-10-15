@@ -12,6 +12,7 @@
 #include "lsp/py_lsp.h"
 #include "pipeline/lsp_resolve.h"
 #include "pipeline/pass_lsp_cross.h"
+#include "foundation/platform.h"
 
 /* ── Helpers — same shape as test_go_lsp.c ──────────────────────── */
 
@@ -2270,6 +2271,169 @@ TEST(pylsp_eval_steps_budget_degrades_gracefully) {
     PASS();
 }
 
+/* ── Batch E — pathological-input hardening + elif/union fixes ───── */
+
+/* Build prefix + (unit x n) + mid + (unit2 x n) + suffix into a malloc'd string. */
+static char *py_build_nested(const char *prefix, const char *unit, int n, const char *mid,
+                             const char *unit2, const char *suffix) {
+    size_t sz = strlen(prefix) + strlen(unit) * (size_t)n + strlen(mid) +
+                strlen(unit2) * (size_t)n + strlen(suffix) + 1;
+    char *out = malloc(sz);
+    if (!out)
+        return NULL;
+    char *p = out;
+    size_t l = strlen(prefix);
+    memcpy(p, prefix, l);
+    p += l;
+    l = strlen(unit);
+    for (int i = 0; i < n; i++, p += l)
+        memcpy(p, unit, l);
+    l = strlen(mid);
+    memcpy(p, mid, l);
+    p += l;
+    l = strlen(unit2);
+    for (int i = 0; i < n; i++, p += l)
+        memcpy(p, unit2, l);
+    strcpy(p, suffix);
+    return out;
+}
+
+TEST(pylsp_batchE_recursive_lambda_terminates) {
+    /* A lambda that calls itself was re-walked at every call site with no
+     * re-entry guard: fib(n-1) + fib(n-2) is exponential. */
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = extract_py("fib = lambda n: n if n < 2 else fib(n-1) + fib(n-2)\n"
+                                  "print(fib(10))\n");
+    uint64_t elapsed = cbm_now_ms() - t0;
+    ASSERT_NOT_NULL(r);
+    ASSERT_LT((int)elapsed, 20000);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Run ONLY the Python LSP pass over `src` (parse + resolve, no extractor) and
+ * return its elapsed milliseconds. The extractor has its own costs on
+ * pathological input; these tests pin py_lsp.c. */
+static uint64_t py_lsp_only_elapsed_ms(const char *src) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_py_lsp_cross(&a, src, (int)strlen(src), "test.main", NULL, 0, NULL, NULL, 0, NULL,
+                         &out, NULL);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&a);
+    return elapsed;
+}
+
+TEST(pylsp_batchE_deep_walrus_chain_terminates) {
+    /* `if x.a.a.a...:` inside a function body (the pass does not walk module-level
+     * `if`) -- py_bind_walrus_in recursed once per attribute
+     * level with no depth cap. */
+    char *src = py_build_nested("def f(x):\n    if x", ".a", 30000, "", "", ":\n        pass\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = py_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT((int)elapsed, 20000);
+    PASS();
+}
+
+TEST(pylsp_batchE_deep_paren_is_none_terminates) {
+    /* `if (((...x...))) is None:` -- py_underlying_ident recursed per paren. */
+    char *src = py_build_nested("def f(x):\n    if ", "(", 30000, "x", ")", " is None:\n        pass\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = py_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT((int)elapsed, 20000);
+    PASS();
+}
+
+TEST(pylsp_batchE_deep_subscript_annotation_terminates) {
+    /* `def f(x: a[a[a[...b...]]]): pass` -- type-annotation parsing recursed
+     * once per bracket level, copying the remaining text at every level. */
+    char *src = py_build_nested("def f(x: ", "a[", 30000, "b", "]", "): pass\n");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = py_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT((int)elapsed, 20000);
+    PASS();
+}
+
+TEST(pylsp_batchE_elif_else_branch_resolves) {
+    /* Only the first `alternative` child (the elif) was walked, so a call
+     * in the trailing else was dropped. */
+    CBMFileResult *r = extract_py("class X:\n"
+                                  "    def run(self):\n"
+                                  "        pass\n"
+                                  "\n"
+                                  "def use(x: X, a, b):\n"
+                                  "    if a:\n"
+                                  "        pass\n"
+                                  "    elif b:\n"
+                                  "        pass\n"
+                                  "    else:\n"
+                                  "        x.run()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "use", "X.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pylsp_batchE_second_elif_branch_resolves) {
+    CBMFileResult *r = extract_py("class X:\n"
+                                  "    def run(self):\n"
+                                  "        pass\n"
+                                  "\n"
+                                  "def use(x: X, a, b, c):\n"
+                                  "    if a:\n"
+                                  "        pass\n"
+                                  "    elif b:\n"
+                                  "        pass\n"
+                                  "    elif c:\n"
+                                  "        x.run()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "use", "X.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pylsp_batchE_list_or_none_return_resolves_element) {
+    /* `-> list[A] | None`: the trailing sentinel iteration reset seen_pipe,
+     * so the union was never built and the element type was lost. */
+    CBMFileResult *r = extract_py("class A:\n"
+                                  "    def run(self):\n"
+                                  "        pass\n"
+                                  "\n"
+                                  "def make() -> list[A] | None:\n"
+                                  "    return None\n"
+                                  "\n"
+                                  "def use():\n"
+                                  "    make()[0].run()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "use", "A.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pylsp_batchE_none_or_list_return_resolves_element) {
+    /* `-> None | list[A]`: the trailing ']' sent the whole text down the
+     * subscript path with base "None | list" instead of the union split. */
+    CBMFileResult *r = extract_py("class A:\n"
+                                  "    def run(self):\n"
+                                  "        pass\n"
+                                  "\n"
+                                  "def make() -> None | list[A]:\n"
+                                  "    return None\n"
+                                  "\n"
+                                  "def use():\n"
+                                  "    make()[0].run()\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "use", "A.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(py_lsp) {
@@ -2367,4 +2531,13 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_issue710_deep_call_chain_resolves);
     RUN_TEST(pylsp_issue710_heterogeneous_receiver_chain);
     RUN_TEST(pylsp_eval_steps_budget_degrades_gracefully);
+    /* Batch E — pathological-input hardening + elif/union fixes */
+    RUN_TEST(pylsp_batchE_recursive_lambda_terminates);
+    RUN_TEST(pylsp_batchE_deep_walrus_chain_terminates);
+    RUN_TEST(pylsp_batchE_deep_paren_is_none_terminates);
+    RUN_TEST(pylsp_batchE_deep_subscript_annotation_terminates);
+    RUN_TEST(pylsp_batchE_elif_else_branch_resolves);
+    RUN_TEST(pylsp_batchE_second_elif_branch_resolves);
+    RUN_TEST(pylsp_batchE_list_or_none_return_resolves_element);
+    RUN_TEST(pylsp_batchE_none_or_list_return_resolves_element);
 }

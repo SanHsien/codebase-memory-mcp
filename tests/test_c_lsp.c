@@ -27,6 +27,7 @@
 #include "lsp/go_lsp.h"
 #include "lsp/type_registry.h"
 #include "../src/pipeline/lsp_resolve.h"
+#include "foundation/platform.h"
 #include "arena.h"
 #include "preprocessor.h"
 #include <stdio.h>
@@ -16499,7 +16500,130 @@ TEST(clsp_preprocessed_destructor_rewrite_respects_origin_during_rewrite) {
     PASS();
 }
 
+/* ── Batch D: adversarial input must terminate; unknown scope must not bind ── */
+
+/* Repeat `unit` n times, then `mid`, then `tail` n times. */
+static char *clsp_build_nested(const char *unit, size_t n, const char *mid, const char *tail) {
+    size_t ul = strlen(unit), ml = strlen(mid), tl = strlen(tail);
+    char *buf = (char *)malloc(n * (ul + tl) + ml + 1);
+    if (!buf) {
+        return NULL;
+    }
+    char *p = buf;
+    for (size_t i = 0; i < n; i++) {
+        memcpy(p, unit, ul);
+        p += ul;
+    }
+    memcpy(p, mid, ml);
+    p += ml;
+    for (size_t i = 0; i < n; i++) {
+        memcpy(p, tail, tl);
+        p += tl;
+    }
+    *p = '\0';
+    return buf;
+}
+
+/* Run the LSP entry point directly (no defs): the surrounding cbm_extract_file
+ * pipeline has its own cost on pathological nesting that is outside c_lsp.c,
+ * so the c_lsp.c walks are exercised on their own. */
+static uint64_t clsp_run_lsp_direct_ms(const char *src) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_c_lsp_cross(&arena, src, (int)strlen(src), "test.mod", /*cpp_mode=*/true,
+                        /*defs=*/NULL, /*def_count=*/0, /*include_paths=*/NULL,
+                        /*include_ns_qns=*/NULL, /*include_count=*/0, /*cached_tree=*/NULL, &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    return elapsed;
+}
+
+TEST(clsp_batchd_deeply_nested_namespaces_terminate) {
+    char *src = clsp_build_nested("namespace a{ ", 30000, "void f(){g();}", "}");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = clsp_run_lsp_direct_ms(src);
+    free(src);
+    ASSERT_TRUE(elapsed < 20000);
+    PASS();
+}
+
+
+/* Cross-file def whose return type text nests 30000 `std::vector<`: the text
+ * parser re-parsed a shrunken per-level copy, without bound. */
+TEST(clsp_batchd_deeply_nested_def_return_type_terminates) {
+    char *ty = clsp_build_nested("std::vector<", 30000, "int", ">");
+    ASSERT_NOT_NULL(ty);
+    CBMLSPDef def;
+    memset(&def, 0, sizeof(def));
+    def.qualified_name = "other.make";
+    def.short_name = "make";
+    def.label = "Function";
+    def.def_module_qn = "other";
+    def.return_types = ty;
+    def.lang = CBM_LANG_CPP;
+    const char *src = "void f() { make(); }\n";
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_c_lsp_cross(&arena, src, (int)strlen(src), "test.mod", /*cpp_mode=*/true, &def, 1,
+                        NULL, NULL, 0, NULL, &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    free(ty);
+    ASSERT_TRUE(elapsed < 20000);
+    PASS();
+}
+
+TEST(clsp_batchd_cyclic_bases_member_lookup_terminates) {
+    enum { FN_COUNT = 200 };
+    size_t cap = 256 + (size_t)FN_COUNT * 64;
+    char *src = (char *)malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t off = (size_t)snprintf(src, cap, "struct A:B,C{}; struct B:A,C{}; struct C:A,B{};\n");
+    for (int i = 0; i < FN_COUNT; i++) {
+        off += (size_t)snprintf(src + off, cap - off, "void f%d(A*a){ a->ext%d(); }\n", i, i);
+    }
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = extract_cpp(src);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(elapsed < 20000);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(clsp_batchd_unknown_scope_does_not_bind_free_function) {
+    CBMFileResult *r = extract_cpp("void run() {}\n"
+                                   "void f() { Other::run(); }\n");
+    ASSERT_NOT_NULL(r);
+    int idx = find_resolved(r, "main.f", "run");
+    if (idx >= 0) {
+        /* Failure detail: which strategy/confidence bound the unrelated function. */
+        ASSERT_STR_EQ(r->resolved_calls.items[idx].strategy, "lsp_unresolved");
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(clsp_batchd_known_namespace_fallback_still_binds) {
+    CBMFileResult *r = extract_cpp("namespace utils { void helper() {} }\n"
+                                   "void f() { utils::helper(); }\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(find_resolved(r, "main.f", "helper"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(c_lsp) {
+    RUN_TEST(clsp_batchd_deeply_nested_namespaces_terminate);
+    RUN_TEST(clsp_batchd_deeply_nested_def_return_type_terminates);
+    RUN_TEST(clsp_batchd_cyclic_bases_member_lookup_terminates);
+    RUN_TEST(clsp_batchd_unknown_scope_does_not_bind_free_function);
+    RUN_TEST(clsp_batchd_known_namespace_fallback_still_binds);
     RUN_TEST(clsp_c_reassigned_function_pointer_calls_join_exact_occurrences);
     RUN_TEST(clsp_c_nested_function_pointer_shadow_restores_outer_target);
     RUN_TEST(clsp_cpp_repeated_same_leaf_calls_join_exact_occurrences);

@@ -150,6 +150,7 @@ static void py_resolve_calls_in(PyLSPContext *ctx, TSNode node) {
 }
 static const CBMType *py_eval_expr_type(PyLSPContext *ctx, TSNode node);
 static const CBMType *py_eval_expr_type_uncached(PyLSPContext *ctx, TSNode node);
+static const CBMType *py_strip_none(PyLSPContext *ctx, const CBMType *t);
 static void py_process_statement(PyLSPContext *ctx, TSNode node);
 static void py_invalidate_possible_bindings(PyLSPContext *ctx, TSNode node, int depth);
 static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const char *type_qn,
@@ -165,7 +166,7 @@ static void py_register_instance_field(PyLSPContext *ctx, const char *class_qn,
 static void py_bind_for_target(PyLSPContext *ctx, TSNode left, const CBMType *elem_type);
 static void py_register_lambda(PyLSPContext *ctx, const char *name, TSNode lambda_node);
 static void py_register_dict_literal(PyLSPContext *ctx, const char *name, TSNode dict_node);
-static TSNode py_lookup_lambda(PyLSPContext *ctx, const char *name);
+static int py_lookup_lambda_index(PyLSPContext *ctx, const char *name);
 static const char *py_lookup_dict_dispatch(PyLSPContext *ctx, const char *var, const char *key);
 
 /* ── Scope mutation wrappers ─────────────────────────────────────────────
@@ -688,16 +689,16 @@ static void py_register_lambda(PyLSPContext *ctx, const char *name, TSNode lambd
     ctx->lambda_count++;
 }
 
-static TSNode py_lookup_lambda(PyLSPContext *ctx, const char *name) {
-    TSNode null_node = {0};
+/* Index of the registered lambda for `name`, or -1. */
+static int py_lookup_lambda_index(PyLSPContext *ctx, const char *name) {
     if (!ctx || !name)
-        return null_node;
+        return -1;
     for (int i = 0; i < ctx->lambda_count; i++) {
         if (ctx->lambdas[i].name && strcmp(ctx->lambdas[i].name, name) == 0) {
-            return ctx->lambdas[i].lambda_node;
+            return i;
         }
     }
-    return null_node;
+    return -1;
 }
 
 /* Helper for stripping quotes from a tree-sitter `string` node text. */
@@ -1949,6 +1950,8 @@ static const CBMType *py_eval_expr_type_uncached(PyLSPContext *ctx, TSNode node)
         if (ts_node_is_null(value))
             return cbm_type_unknown();
         const CBMType *container = py_eval_expr_type(ctx, value);
+        /* `list[A] | None` / `Optional[list[A]]`: index the non-None member. */
+        container = py_strip_none(ctx, container);
 
         // TypedDict literal-key subscript: d["foo"] where d: TD and TD has
         // class-body annotation `foo: Foo`. Field is registered via
@@ -2517,7 +2520,8 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
         // Walk the lambda body for any nested call sites with the params
         // bound to the call's arg types. Resolved calls get caller_qn
         // set to a synthetic <lambda> child of the enclosing function.
-        TSNode lambda_node = py_lookup_lambda(ctx, fname);
+        int lambda_idx = py_lookup_lambda_index(ctx, fname);
+        TSNode lambda_node = lambda_idx >= 0 ? ctx->lambdas[lambda_idx].lambda_node : (TSNode){0};
         if (!ts_node_is_null(lambda_node)) {
             TSNode params = ts_node_child_by_field_name(lambda_node, "parameters", 10);
             TSNode body = ts_node_child_by_field_name(lambda_node, "body", 4);
@@ -2554,7 +2558,15 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
             ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.<lambda>",
                                                        prev_func ? prev_func : ctx->module_qn);
             if (!ts_node_is_null(body)) {
+                /* Re-entry guard: while this lambda's body is being walked its
+                 * name is hidden from the registry, so a self- or mutually
+                 * recursive call (`fib = lambda n: ... fib(n-1) + fib(n-2)`)
+                 * is not re-walked at every call site -- that was exponential.
+                 * Index-based: the registry may grow (realloc) during the walk. */
+                const char *hidden_name = ctx->lambdas[lambda_idx].name;
+                ctx->lambdas[lambda_idx].name = NULL;
                 py_resolve_calls_in(ctx, body);
+                ctx->lambdas[lambda_idx].name = hidden_name;
             }
             ctx->enclosing_func_qn = prev_func;
             py_scope_restore(ctx, saved);
@@ -2863,10 +2875,17 @@ static char *py_underlying_ident(PyLSPContext *ctx, TSNode node) {
     if (strcmp(k, "identifier") == 0) {
         return py_node_text(ctx, node);
     }
-    if (strcmp(k, "parenthesized_expression") == 0) {
-        if (ts_node_named_child_count(node) > 0) {
-            return py_underlying_ident(ctx, ts_node_named_child(node, 0));
-        }
+    /* Unwrap parentheses iteratively: `(((x)))` must not recurse per level. */
+    while (strcmp(k, "parenthesized_expression") == 0) {
+        if (ts_node_named_child_count(node) == 0)
+            return NULL;
+        node = ts_node_named_child(node, 0);
+        if (ts_node_is_null(node))
+            return NULL;
+        k = ts_node_type(node);
+    }
+    if (strcmp(k, "identifier") == 0) {
+        return py_node_text(ctx, node);
     }
     if (strcmp(k, "named_expression") == 0 || strcmp(k, "assignment_expression") == 0) {
         TSNode left = ts_node_child_by_field_name(node, "name", 4);
@@ -2966,8 +2985,10 @@ static const CBMType *py_strip_none(PyLSPContext *ctx, const CBMType *t) {
 
 /* Walk a node's subtree looking for walrus expressions and bind their
  * targets in the enclosing function scope (PEP 572 semantics). */
-static void py_bind_walrus_in(PyLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node))
+static void py_bind_walrus_in(PyLSPContext *ctx, TSNode node, int depth) {
+    /* Depth-capped like the call walk: a long `x.a.a.a...` chain must not
+     * recurse once per link. Past the cap the subtree binds nothing. */
+    if (ts_node_is_null(node) || depth >= cbm_lsp_max_walk_depth())
         return;
     const char *k = ts_node_type(node);
     if (strcmp(k, "named_expression") == 0 || strcmp(k, "assignment_expression") == 0) {
@@ -2990,7 +3011,7 @@ static void py_bind_walrus_in(PyLSPContext *ctx, TSNode node) {
     }
     uint32_t nc = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
-        py_bind_walrus_in(ctx, ts_node_named_child(node, i));
+        py_bind_walrus_in(ctx, ts_node_named_child(node, i), depth + 1);
     }
 }
 
@@ -3009,6 +3030,11 @@ static bool py_block_terminates(TSNode block) {
            strcmp(k, "break_statement") == 0 || strcmp(k, "continue_statement") == 0;
 }
 
+static bool py_is_if_alternative(TSNode node) {
+    const char *k = ts_node_type(node);
+    return strcmp(k, "elif_clause") == 0 || strcmp(k, "else_clause") == 0;
+}
+
 /* Walk if_statement: push scope for consequence body when narrowing
  * applies, then recurse. If the consequence terminates (return/raise),
  * apply the negated narrow to the *enclosing* scope so subsequent
@@ -3016,13 +3042,18 @@ static bool py_block_terminates(TSNode block) {
 static void py_walk_if_statement(PyLSPContext *ctx, TSNode if_node) {
     TSNode cond = ts_node_child_by_field_name(if_node, "condition", 9);
     TSNode body = ts_node_child_by_field_name(if_node, "consequence", 11);
+    /* `alternative` is a repeated field: every elif_clause plus the else_clause. */
     TSNode alt = ts_node_child_by_field_name(if_node, "alternative", 11);
 
     py_invalidate_possible_bindings(ctx, body, 0);
-    py_invalidate_possible_bindings(ctx, alt, 0);
+    for (uint32_t i = 0, n = ts_node_named_child_count(if_node); i < n; i++) {
+        TSNode c = ts_node_named_child(if_node, i);
+        if (py_is_if_alternative(c))
+            py_invalidate_possible_bindings(ctx, c, 0);
+    }
 
     // Walrus bindings in the condition leak into the enclosing scope.
-    py_bind_walrus_in(ctx, cond);
+    py_bind_walrus_in(ctx, cond, 0);
 
     // Always evaluate the condition (may bind via walrus, currently a no-op).
     py_resolve_calls_in(ctx, cond);
@@ -3090,7 +3121,11 @@ static void py_walk_if_statement(PyLSPContext *ctx, TSNode if_node) {
     // Alternative branch: include else / elif. Recurse without narrowing —
     // the else branch's narrowing is the negation, which we don't model in v1.
     if (!ts_node_is_null(alt)) {
-        py_resolve_calls_in(ctx, alt);
+        for (uint32_t i = 0, n = ts_node_named_child_count(if_node); i < n; i++) {
+            TSNode c = ts_node_named_child(if_node, i);
+            if (py_is_if_alternative(c))
+                py_resolve_calls_in(ctx, c);
+        }
     }
 
     // Early-return narrowing: if the consequence block terminates and the
@@ -3527,9 +3562,22 @@ static const char **py_split_subscript_args(CBMArena *arena, const char *s, int 
     return out;
 }
 
+/* Annotation text recurses once per nesting level and copies the remaining text
+ * at every level, so a pathological `a[a[a[...]]]` is quadratic work and can
+ * exhaust the native stack. Past this depth the type degrades to UNKNOWN. */
+enum { PY_TYPE_TEXT_MAX_DEPTH = 64 };
+
+static const CBMType *py_parse_type_text_depth(CBMArena *arena, const char *ann,
+                                               const char *module_qn, int depth);
+
 static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                                             const char *module_qn) {
-    if (!ann || !ann[0])
+    return py_parse_type_text_depth(arena, ann, module_qn, 0);
+}
+
+static const CBMType *py_parse_type_text_depth(CBMArena *arena, const char *ann,
+                                               const char *module_qn, int depth) {
+    if (!ann || !ann[0] || depth > PY_TYPE_TEXT_MAX_DEPTH)
         return cbm_type_unknown();
     size_t len = strlen(ann);
 
@@ -3538,12 +3586,14 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
         if (unquoted) {
             memcpy(unquoted, ann + 1, len - 2);
             unquoted[len - 2] = '\0';
-            return py_parse_type_text_qn(arena, unquoted, module_qn);
+            return py_parse_type_text_depth(arena, unquoted, module_qn, depth + 1);
         }
     }
 
     const char *lb = strchr(ann, '[');
-    if (lb && len > 0 && ann[len - 1] == ']') {
+    /* A '|' before the first '[' means `A | list[B]`: a top-level union, not a
+     * subscript whose base is "A | list" -- leave it to the union split below. */
+    if (lb && len > 0 && ann[len - 1] == ']' && !memchr(ann, '|', (size_t)(lb - ann))) {
         size_t base_len = (size_t)(lb - ann);
         char *base = (char *)cbm_arena_alloc(arena, base_len + 1);
         if (base) {
@@ -3571,7 +3621,8 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                         arena, (size_t)(arg_n + 1) * sizeof(const CBMType *));
                     if (arg_types) {
                         for (int i = 0; i < arg_n; i++) {
-                            arg_types[i] = py_parse_type_text_qn(arena, arg_strs[i], module_qn);
+                            arg_types[i] =
+                                py_parse_type_text_depth(arena, arg_strs[i], module_qn, depth + 1);
                         }
                         arg_types[arg_n] = NULL;
                     }
@@ -3634,7 +3685,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                 if (arg_types && arg_n > 0) {
                     return cbm_type_template(arena, btrim, arg_types, arg_n);
                 }
-                return py_parse_type_text_qn(arena, btrim, module_qn);
+                return py_parse_type_text_depth(arena, btrim, module_qn, depth + 1);
             }
         }
     }
@@ -3655,7 +3706,9 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                 else if (cc == ']' || cc == ')' || cc == '}')
                     d2--;
                 else if (cc == '|' && d2 == 0) {
-                    seen_pipe = (j < len);
+                    /* The sentinel '|' at j == len must not clear a real pipe. */
+                    if (j < len)
+                        seen_pipe = true;
                     char *p = py_trim_ws(arena, ann + start, j - start);
                     if (p && p[0] && onum < cap)
                         out[onum++] = p;
@@ -3667,7 +3720,7 @@ static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                     arena, (size_t)(onum + 1) * sizeof(const CBMType *));
                 if (members) {
                     for (int j = 0; j < onum; j++) {
-                        members[j] = py_parse_type_text_qn(arena, out[j], module_qn);
+                        members[j] = py_parse_type_text_depth(arena, out[j], module_qn, depth + 1);
                     }
                     return cbm_type_union(arena, members, onum);
                 }
@@ -3747,8 +3800,14 @@ static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann) {
  * `Optional[Foo]` / `Union[A, B]` into TEMPLATE / UNION shapes so
  * subsequent code can reach into element types for comprehensions
  * etc. */
+static const CBMType *py_resolve_annotation_depth(PyLSPContext *ctx, const char *ann, int depth);
+
 static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) {
-    if (!ann || !ann[0])
+    return py_resolve_annotation_depth(ctx, ann, 0);
+}
+
+static const CBMType *py_resolve_annotation_depth(PyLSPContext *ctx, const char *ann, int depth) {
+    if (!ann || !ann[0] || depth > PY_TYPE_TEXT_MAX_DEPTH)
         return cbm_type_unknown();
 
     // Strip outer quotes for forward references: `"Foo"` -> `Foo`.
@@ -3758,14 +3817,14 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
         if (unquoted) {
             memcpy(unquoted, ann + 1, len - 2);
             unquoted[len - 2] = '\0';
-            return py_resolve_annotation(ctx, unquoted);
+            return py_resolve_annotation_depth(ctx, unquoted, depth + 1);
         }
     }
 
     // Generic subscript: `list[Foo]` / `Optional[Foo]` / `Union[A, B]` /
     // `dict[K, V]`. Parse the base name + comma-split args at depth 0.
     const char *lb = strchr(ann, '[');
-    if (lb && len > 0 && ann[len - 1] == ']') {
+    if (lb && len > 0 && ann[len - 1] == ']' && !memchr(ann, '|', (size_t)(lb - ann))) {
         size_t base_len = (size_t)(lb - ann);
         char *base = (char *)cbm_arena_alloc(ctx->arena, base_len + 1);
         if (base) {
@@ -3796,7 +3855,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                         ctx->arena, (size_t)(arg_n + 1) * sizeof(const CBMType *));
                     if (arg_types) {
                         for (int i = 0; i < arg_n; i++) {
-                            arg_types[i] = py_resolve_annotation(ctx, arg_strs[i]);
+                            arg_types[i] = py_resolve_annotation_depth(ctx, arg_strs[i], depth + 1);
                         }
                         arg_types[arg_n] = NULL;
                     }
@@ -3856,7 +3915,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                 if (arg_types && arg_n > 0) {
                     return cbm_type_template(ctx->arena, btrim, arg_types, arg_n);
                 }
-                return py_resolve_annotation(ctx, btrim);
+                return py_resolve_annotation_depth(ctx, btrim, depth + 1);
             }
         }
     }
@@ -3904,7 +3963,7 @@ static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann) 
                     if (!members)
                         break;
                     for (int j = 0; j < onum; j++) {
-                        members[j] = py_resolve_annotation(ctx, out[j]);
+                        members[j] = py_resolve_annotation_depth(ctx, out[j], depth + 1);
                     }
                     return cbm_type_union(ctx->arena, members, onum);
                 }

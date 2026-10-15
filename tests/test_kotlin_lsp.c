@@ -31,6 +31,8 @@
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/kotlin_lsp.h"
+#include <foundation/platform.h>
+#include "lang_specs.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1418,6 +1420,162 @@ TEST(ktlsp_callable_ref_class_literal) {
     PASS();
 }
 
+/* ── 35. Pathological nesting + negative smart-cast ─────────── */
+
+/* Build prefix + (unit x n) + mid + (unit2 x n) + suffix into one heap string. */
+static char *kt_repeat_build(const char *prefix, const char *unit, int n, const char *mid,
+                             const char *unit2, int n2, const char *suffix) {
+    size_t cap = strlen(prefix) + strlen(unit) * (size_t)n + strlen(mid) +
+                 strlen(unit2) * (size_t)n2 + strlen(suffix) + 1;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        return NULL;
+    }
+    char *p = buf;
+    size_t l = strlen(prefix);
+    memcpy(p, prefix, l);
+    p += l;
+    l = strlen(unit);
+    for (int i = 0; i < n; i++) {
+        memcpy(p, unit, l);
+        p += l;
+    }
+    l = strlen(mid);
+    memcpy(p, mid, l);
+    p += l;
+    l = strlen(unit2);
+    for (int i = 0; i < n2; i++) {
+        memcpy(p, unit2, l);
+        p += l;
+    }
+    l = strlen(suffix);
+    memcpy(p, suffix, l + 1);
+    return buf;
+}
+
+#define KT_PATHOLOGICAL_BUDGET_MS 20000
+
+/* Run only the Kotlin LSP pass on a freshly parsed tree and return its elapsed
+ * milliseconds (UINT64_MAX when setup fails). The full cbm_extract_file path
+ * also runs the generic extractors, which are themselves superlinear on these
+ * pathological inputs and are outside the LSP under test. */
+static uint64_t kt_lsp_only_elapsed_ms(const char *src) {
+    const TSLanguage *lang = cbm_ts_language(CBM_LANG_KOTLIN);
+    TSParser *parser = ts_parser_new();
+    if (!lang || !parser) {
+        return UINT64_MAX;
+    }
+    ts_parser_set_language(parser, lang);
+    int len = (int)strlen(src);
+    TSTree *tree = ts_parser_parse_string(parser, NULL, src, (uint32_t)len);
+    ts_parser_delete(parser);
+    if (!tree) {
+        return UINT64_MAX;
+    }
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMFileResult result;
+    memset(&result, 0, sizeof(result));
+    result.module_qn = "test.Main";
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_kotlin_lsp(&arena, &result, src, len, ts_tree_root_node(tree));
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    ts_tree_delete(tree);
+    return elapsed;
+}
+
+TEST(ktlsp_deep_nested_lambdas_bounded) {
+    char *src = kt_repeat_build("fun g(){ ", "f{ ", 30000, "", "} ", 30000, "}");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = kt_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT(elapsed, KT_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
+TEST(ktlsp_deep_nested_if_bounded) {
+    char *src = kt_repeat_build("fun g(a: Boolean){ ", "if(a){ ", 30000, "", "} ", 30000, "}");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = kt_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT(elapsed, KT_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
+TEST(ktlsp_deep_nested_classes_bounded) {
+    char *src = kt_repeat_build("", "class A { ", 20000, "", "} ", 20000, "");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = kt_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT(elapsed, KT_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
+TEST(ktlsp_deep_else_if_chain_bounded) {
+    char *src = kt_repeat_build("fun g(a:Int){ ", "if(a==0) x() else ", 30000, "x()", "", 0, " }");
+    ASSERT_NOT_NULL(src);
+    uint64_t elapsed = kt_lsp_only_elapsed_ms(src);
+    free(src);
+    ASSERT_LT(elapsed, KT_PATHOLOGICAL_BUDGET_MS);
+    PASS();
+}
+
+TEST(ktlsp_not_is_does_not_narrow) {
+    /* `x !is Dog` must NOT narrow x to Dog inside the then-branch. */
+    CBMFileResult *r =
+        extract_kotlin("open class Animal { open fun speak() {} }\n"
+                       "class Dog : Animal() { override fun speak() {} }\n"
+                       "fun f(x: Animal) { if (x !is Dog) { x.speak() } }\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_resolved(r, "f", "Dog.speak"), 0);
+    ASSERT_GTE(require_resolved(r, "f", "Animal.speak"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(ktlsp_when_not_is_does_not_narrow) {
+    CBMFileResult *r = extract_kotlin("open class Animal { open fun speak() {} }\n"
+                                      "class Dog : Animal() { override fun speak() {} }\n"
+                                      "fun f(x: Animal) {\n"
+                                      "    when (x) {\n"
+                                      "        !is Dog -> x.speak()\n"
+                                      "        else -> {}\n"
+                                      "    }\n"
+                                      "}\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_resolved(r, "f", "Dog.speak"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(ktlsp_is_still_narrows_after_not_is_fix) {
+    CBMFileResult *r =
+        extract_kotlin("open class Animal { open fun speak() {} }\n"
+                       "class Dog : Animal() { override fun speak() {} }\n"
+                       "fun f(x: Animal) { if (x is Dog) { x.speak() } }\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "f", "Dog.speak"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(ktlsp_if_else_branch_call_resolved) {
+    /* K5 probe: the else-branch call must be resolved too. */
+    CBMFileResult *r = extract_kotlin("class Svc {\n"
+                                      "    fun a() {}\n"
+                                      "    fun b() {}\n"
+                                      "}\n"
+                                      "fun f(s: Svc, c: Boolean) {\n"
+                                      "    if (c) { s.a() } else { s.b() }\n"
+                                      "}\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "f", "Svc.a"), 0);
+    ASSERT_GTE(require_resolved(r, "f", "Svc.b"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── suite registration ────────────────────────────────────── */
 
 SUITE(kotlin_lsp) {
@@ -1517,4 +1675,13 @@ SUITE(kotlin_lsp) {
     RUN_TEST(ktlsp_callable_ref_top_level);
     RUN_TEST(ktlsp_callable_ref_method);
     RUN_TEST(ktlsp_callable_ref_class_literal);
+    /* Pathological nesting + negative smart-cast */
+    RUN_TEST(ktlsp_if_else_branch_call_resolved);
+    RUN_TEST(ktlsp_is_still_narrows_after_not_is_fix);
+    RUN_TEST(ktlsp_not_is_does_not_narrow);
+    RUN_TEST(ktlsp_when_not_is_does_not_narrow);
+    RUN_TEST(ktlsp_deep_else_if_chain_bounded);
+    RUN_TEST(ktlsp_deep_nested_lambdas_bounded);
+    RUN_TEST(ktlsp_deep_nested_if_bounded);
+    RUN_TEST(ktlsp_deep_nested_classes_bounded);
 }

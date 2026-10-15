@@ -93,9 +93,40 @@ static void kt_resolve_calls_in_node(KotlinLSPContext *ctx, TSNode node) {
     kt_resolve_calls_in_node_inner(ctx, node);
     ctx->walk_depth--;
 }
-static void kt_process_class_decl(KotlinLSPContext *ctx, TSNode node);
+static void kt_process_class_decl_inner(KotlinLSPContext *ctx, TSNode node);
+static void kt_process_object_decl_inner(KotlinLSPContext *ctx, TSNode node, bool is_companion,
+                                         const char *outer_class_qn);
+static void kt_walk_top_level_for_resolution_inner(KotlinLSPContext *ctx, TSNode root,
+                                                   const char *enclosing_class_qn);
+
+/* Depth-guarded entries for declaration nesting. `class A { class A { ... } }`
+ * recurses kt_process_class_decl -> kt_register_class_members -> back, and the
+ * resolution walk mirrors it, rebuilding the (ever-longer) nested QN at every
+ * level: tens of thousands of levels hang or overflow the stack. They share
+ * the walk_depth budget; past the cap the nested declarations are skipped. */
+static void kt_process_class_decl(KotlinLSPContext *ctx, TSNode node) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
+    kt_process_class_decl_inner(ctx, node);
+    ctx->walk_depth--;
+}
 static void kt_process_object_decl(KotlinLSPContext *ctx, TSNode node, bool is_companion,
-                                   const char *outer_class_qn);
+                                   const char *outer_class_qn) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
+    kt_process_object_decl_inner(ctx, node, is_companion, outer_class_qn);
+    ctx->walk_depth--;
+}
+static void kt_walk_top_level_for_resolution(KotlinLSPContext *ctx, TSNode root,
+                                             const char *enclosing_class_qn) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
+    kt_walk_top_level_for_resolution_inner(ctx, root, enclosing_class_qn);
+    ctx->walk_depth--;
+}
 static void kt_process_function_decl(KotlinLSPContext *ctx, TSNode node);
 static void kt_process_property_decl(KotlinLSPContext *ctx, TSNode node);
 static void kt_register_class_members(KotlinLSPContext *ctx, const char *class_qn, TSNode body,
@@ -303,6 +334,38 @@ static TSNode kt_field_named(TSNode parent, const char *field) {
         return parent;
     }
     return ts_node_child_by_field_name(parent, field, (uint32_t)strlen(field));
+}
+
+/* Collect the named children of `node` in one cursor pass. ts_node_named_child
+ * (node, i) is O(i), so an index loop over a wide node (such as the flat ERROR
+ * node this grammar yields for thousands of nested `class A {`) is quadratic.
+ * Returns an arena array (NULL when there are none) and sets *count. */
+static TSNode *kt_named_children(CBMArena *arena, TSNode node, uint32_t *count) {
+    *count = 0;
+    if (ts_node_is_null(node)) {
+        return NULL;
+    }
+    uint32_t cap = ts_node_named_child_count(node);
+    if (cap == 0) {
+        return NULL;
+    }
+    TSNode *arr = (TSNode *)cbm_arena_alloc(arena, (size_t)cap * sizeof(TSNode));
+    if (!arr) {
+        return NULL;
+    }
+    uint32_t n = 0;
+    TSTreeCursor cursor = ts_tree_cursor_new(node);
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        do {
+            TSNode child = ts_tree_cursor_current_node(&cursor);
+            if (ts_node_is_named(child) && n < cap) {
+                arr[n++] = child;
+            }
+        } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+    *count = n;
+    return arr;
 }
 
 /* Find the first descendant matching kind, depth-first, capped at max_depth. */
@@ -1528,9 +1591,10 @@ static void kt_collect_top_level_decls(KotlinLSPContext *ctx, TSNode root) {
     if (ts_node_is_null(root)) {
         return;
     }
-    uint32_t nc = ts_node_named_child_count(root);
+    uint32_t nc = 0;
+    TSNode *kids = kt_named_children(ctx->arena, root, &nc);
     for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = ts_node_named_child(root, i);
+        TSNode c = kids[i];
         const char *kind = ts_node_type(c);
         /* The vendored Kotlin grammar can't parse `interface` at file
          * scope (and a few other constructs), producing an ERROR node
@@ -1538,7 +1602,11 @@ static void kt_collect_top_level_decls(KotlinLSPContext *ctx, TSNode root) {
          * we can still register the class/function declarations the
          * parser managed to recognize inside it. */
         if (strcmp(kind, "ERROR") == 0) {
-            kt_collect_top_level_decls(ctx, c);
+            if (ctx->walk_depth < cbm_lsp_max_walk_depth()) {
+                ctx->walk_depth++;
+                kt_collect_top_level_decls(ctx, c);
+                ctx->walk_depth--;
+            }
             continue;
         }
         if (strcmp(kind, "class_declaration") == 0) {
@@ -1621,7 +1689,7 @@ static const char *kt_qn_for_class_decl(KotlinLSPContext *ctx, TSNode class_node
     return kt_join_dot(ctx->arena, ctx->package_qn, short_name);
 }
 
-static void kt_process_class_decl(KotlinLSPContext *ctx, TSNode node) {
+static void kt_process_class_decl_inner(KotlinLSPContext *ctx, TSNode node) {
     const char *class_qn = kt_qn_for_class_decl(ctx, node);
     if (!class_qn) {
         return;
@@ -1867,8 +1935,8 @@ static void kt_process_class_decl(KotlinLSPContext *ctx, TSNode node) {
     }
 }
 
-static void kt_process_object_decl(KotlinLSPContext *ctx, TSNode node, bool is_companion,
-                                   const char *outer_class_qn) {
+static void kt_process_object_decl_inner(KotlinLSPContext *ctx, TSNode node, bool is_companion,
+                                         const char *outer_class_qn) {
     TSNode name = kt_field_named(node, "name");
     if (ts_node_is_null(name)) {
         name = kt_name_child(node);
@@ -2196,28 +2264,26 @@ static void kt_process_property_decl(KotlinLSPContext *ctx, TSNode node) {
 /* ── type parsing ─────────────────────────────────────────────────── */
 
 const CBMType *kotlin_parse_type_node(KotlinLSPContext *ctx, TSNode node) {
-    if (ts_node_is_null(node)) {
-        return cbm_type_unknown();
-    }
-    const char *kind = ts_node_type(node);
-    if (strcmp(kind, "type") == 0) {
-        /* Unwrap to inner type */
-        uint32_t nc = ts_node_named_child_count(node);
-        if (nc > 0) {
-            return kotlin_parse_type_node(ctx, ts_node_named_child(node, 0));
+    /* Unwrap type / nullable / non-null / parenthesized wrappers iteratively:
+     * `((((...Foo...))))` nested thousands deep must not recurse per level. */
+    const char *kind = NULL;
+    for (;;) {
+        if (ts_node_is_null(node)) {
+            return cbm_type_unknown();
         }
-    }
-    if (strcmp(kind, "nullable_type") == 0) {
-        TSNode inner = ts_node_named_child(node, 0);
-        return kotlin_parse_type_node(ctx, inner);
-    }
-    if (strcmp(kind, "non_nullable_type") == 0) {
-        TSNode inner = ts_node_named_child(node, 0);
-        return kotlin_parse_type_node(ctx, inner);
-    }
-    if (strcmp(kind, "parenthesized_type") == 0) {
-        TSNode inner = ts_node_named_child(node, 0);
-        return kotlin_parse_type_node(ctx, inner);
+        kind = ts_node_type(node);
+        if (strcmp(kind, "type") == 0) {
+            /* Unwrap to inner type */
+            if (ts_node_named_child_count(node) > 0) {
+                node = ts_node_named_child(node, 0);
+                continue;
+            }
+        } else if (strcmp(kind, "nullable_type") == 0 || strcmp(kind, "non_nullable_type") == 0 ||
+                   strcmp(kind, "parenthesized_type") == 0) {
+            node = ts_node_named_child(node, 0);
+            continue;
+        }
+        break;
     }
     if (strcmp(kind, "function_type") == 0) {
         /* (A, B) -> R — represent as CALLABLE for completeness */
@@ -2424,12 +2490,17 @@ static const char *kt_exact_callable_reference_target(KotlinLSPContext *ctx, TSN
     if (!ctx || ts_node_is_null(node))
         return NULL;
     const char *kind = ts_node_type(node);
-    if (strcmp(kind, "expression") == 0 || strcmp(kind, "primary_expression") == 0 ||
-        strcmp(kind, "parenthesized_expression") == 0 ||
-        strcmp(kind, "annotated_expression") == 0) {
-        return ts_node_named_child_count(node) == 1
-                   ? kt_exact_callable_reference_target(ctx, ts_node_named_child(node, 0))
-                   : NULL;
+    /* Unwrap single-child wrappers iteratively: `((((::f))))` nested deeply
+     * must not recurse once per level. */
+    while (strcmp(kind, "expression") == 0 || strcmp(kind, "primary_expression") == 0 ||
+           strcmp(kind, "parenthesized_expression") == 0 ||
+           strcmp(kind, "annotated_expression") == 0) {
+        if (ts_node_named_child_count(node) != 1)
+            return NULL;
+        node = ts_node_named_child(node, 0);
+        if (ts_node_is_null(node))
+            return NULL;
+        kind = ts_node_type(node);
     }
     if (strcmp(kind, "callable_reference") != 0 ||
         kt_callable_reference_has_ambiguous_parent(node)) {
@@ -3177,8 +3248,7 @@ static const CBMType *kt_eval_navigation_expression_type_at(KotlinLSPContext *ct
             if (is_member) {
                 /* A member call on an `object`/`companion object` singleton is a
                  * static dispatch; on a regular class instance it is a method. */
-                const CBMRegisteredType *recv_rt =
-                    cbm_registry_lookup_type(ctx->registry, recv_qn);
+                const CBMRegisteredType *recv_rt = cbm_registry_lookup_type(ctx->registry, recv_qn);
                 strat = (recv_rt && recv_rt->is_object) ? "lsp_kt_static" : "lsp_kt_method";
             }
             /* A call through the lambda implicit parameter `it` (e.g. inside
@@ -3312,7 +3382,21 @@ static const CBMType *kt_eval_navigation_expression_type_at(KotlinLSPContext *ct
 
 /* ── statement processing ─────────────────────────────────────────── */
 
-static void kt_process_statement(KotlinLSPContext *ctx, TSNode stmt);
+static void kt_process_statement_inner(KotlinLSPContext *ctx, TSNode stmt);
+
+/* Depth-guarded entry for statement processing. The statement / block /
+ * lambda / if / when / for handlers recurse through each other without ever
+ * passing kt_resolve_calls_in_node, so `f { f { ... } }` or `if (a) { if (a) {
+ * ... } }` nested tens of thousands deep would overflow the native stack (or
+ * go quadratic). Share the walk_depth budget; past the cap the subtree is
+ * skipped and its calls stay unresolved. */
+static void kt_process_statement(KotlinLSPContext *ctx, TSNode stmt) {
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
+    kt_process_statement_inner(ctx, stmt);
+    ctx->walk_depth--;
+}
 
 static void kt_process_block_stmts(KotlinLSPContext *ctx, TSNode block) {
     if (ts_node_is_null(block)) {
@@ -3590,10 +3674,17 @@ static void kt_invalidate_conditionally_assigned_aliases(KotlinLSPContext *ctx, 
         }
         return;
     }
+    /* An `else if` chain or nested block can be tens of thousands deep; share
+     * the walk_depth budget so the recursion stays bounded. Past the cap the
+     * deeper assignments are not visited (aliases they touch stay as bound). */
+    if (ctx->walk_depth >= cbm_lsp_max_walk_depth())
+        return;
+    ctx->walk_depth++;
     uint32_t nc = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         kt_invalidate_conditionally_assigned_aliases(ctx, ts_node_named_child(node, i));
     }
+    ctx->walk_depth--;
 }
 
 /* Smart-cast inside `if (x is Foo)`. Detects pattern in stmt and binds
@@ -3623,6 +3714,17 @@ static void kt_apply_smart_cast(KotlinLSPContext *ctx, TSNode condition_expr, bo
     if (!(kt_node_is(lhs, "identifier") || kt_node_is(lhs, "simple_identifier"))) {
         return;
     }
+    /* `x !is Foo` proves the opposite in the then-branch: never narrow to Foo.
+     * The negation is the `!` in the operator gap between operand and type. */
+    {
+        uint32_t gap_start = ts_node_end_byte(lhs);
+        uint32_t gap_end = ts_node_start_byte(rhs);
+        for (uint32_t b = gap_start; b < gap_end; b++) {
+            if (ctx->source[b] == '!') {
+                return;
+            }
+        }
+    }
     char *name = kt_node_text(ctx, lhs);
     if (!name) {
         return;
@@ -3643,7 +3745,11 @@ static void kt_process_if_expression(KotlinLSPContext *ctx, TSNode node) {
         cond = ts_node_named_child(node, 0);
     }
 
-    TSNode then_b = kt_field_named(node, "then");
+    /* The grammar's fields are condition / consequence / alternative. */
+    TSNode then_b = kt_field_named(node, "consequence");
+    if (ts_node_is_null(then_b)) {
+        then_b = kt_field_named(node, "then");
+    }
     if (ts_node_is_null(then_b)) {
         /* Find the first non-condition block/expression */
         uint32_t nc = ts_node_named_child_count(node);
@@ -3668,6 +3774,19 @@ static void kt_process_if_expression(KotlinLSPContext *ctx, TSNode node) {
         } else {
             kt_resolve_calls_in_node(ctx, then_b);
             kotlin_eval_expr_type(ctx, then_b);
+        }
+        ctx->current_scope = cbm_scope_pop(ctx->current_scope);
+    }
+    /* The else branch (a block, an expression, or a nested `else if`) gets its
+     * own scope and no smart-cast: the condition proves nothing about it. */
+    TSNode else_b = kt_field_named(node, "alternative");
+    if (!ts_node_is_null(else_b)) {
+        ctx->current_scope = cbm_scope_push(ctx->arena, ctx->current_scope);
+        if (kt_node_is(else_b, "block") || kt_node_is(else_b, "control_structure_body")) {
+            kt_process_block_stmts(ctx, else_b);
+        } else {
+            kt_resolve_calls_in_node(ctx, else_b);
+            kotlin_eval_expr_type(ctx, else_b);
         }
         ctx->current_scope = cbm_scope_pop(ctx->current_scope);
     }
@@ -3707,6 +3826,17 @@ static void kt_process_when_expression(KotlinLSPContext *ctx, TSNode node) {
             TSNode ec = ts_node_named_child(c, e);
             if (kt_node_is(ec, "_when_condition") || kt_node_is(ec, "when_condition") ||
                 kt_node_is(ec, "type_test")) {
+                /* `!is Foo ->` proves the subject is NOT Foo: never narrow. */
+                char *cond_text = kt_node_text(ctx, ec);
+                if (cond_text) {
+                    const char *ct = cond_text;
+                    while (*ct == ' ' || *ct == '\t' || *ct == '\n' || *ct == '\r') {
+                        ct++;
+                    }
+                    if (strncmp(ct, "!is", 3) == 0) {
+                        continue;
+                    }
+                }
                 /* Find a 'type' node and apply smart-cast on subject_name */
                 TSNode tt = kt_find_descendant_kind(ec, "type", 3);
                 if (ts_node_is_null(tt)) {
@@ -3961,7 +4091,7 @@ static void kt_process_call_with_lambda(KotlinLSPContext *ctx, TSNode call_node)
     kt_process_lambda(ctx, lambda, recv_t);
 }
 
-static void kt_process_statement(KotlinLSPContext *ctx, TSNode stmt) {
+static void kt_process_statement_inner(KotlinLSPContext *ctx, TSNode stmt) {
     if (ts_node_is_null(stmt)) {
         return;
     }
@@ -4348,12 +4478,13 @@ static void kt_process_function_body(KotlinLSPContext *ctx, TSNode func_node, co
     ctx->enclosing_super_qn = prev_super_qn;
 }
 
-static void kt_walk_top_level_for_resolution(KotlinLSPContext *ctx, TSNode root,
-                                             const char *enclosing_class_qn) {
+static void kt_walk_top_level_for_resolution_inner(KotlinLSPContext *ctx, TSNode root,
+                                                   const char *enclosing_class_qn) {
     if (ts_node_is_null(root)) {
         return;
     }
-    uint32_t nc = ts_node_named_child_count(root);
+    uint32_t nc = 0;
+    TSNode *kids = kt_named_children(ctx->arena, root, &nc);
     if (ctx->debug) {
         fprintf(stderr, "[kotlin_lsp] walk_top_level enclosing=%s root_kind=%s nc=%u\n",
                 enclosing_class_qn ? enclosing_class_qn : "(top)", ts_node_type(root), nc);
@@ -4361,13 +4492,13 @@ static void kt_walk_top_level_for_resolution(KotlinLSPContext *ctx, TSNode root,
     /* Register delegated members before resolving any method bodies so source
      * order cannot decide whether an earlier reader sees getValue/setValue. */
     for (uint32_t i = 0; i < nc; i++) {
-        TSNode candidate = ts_node_named_child(root, i);
+        TSNode candidate = kids[i];
         if (kt_node_is(candidate, "property_declaration")) {
             kt_register_property_delegate(ctx, candidate, enclosing_class_qn);
         }
     }
     for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = ts_node_named_child(root, i);
+        TSNode c = kids[i];
         const char *kind = ts_node_type(c);
         if (ctx->debug) {
             uint32_t sb = ts_node_start_byte(c);
@@ -4383,6 +4514,7 @@ static void kt_walk_top_level_for_resolution(KotlinLSPContext *ctx, TSNode root,
          * grammar can't parse `interface` at file scope) still get their
          * recoverable function/class bodies resolved. */
         if (strcmp(kind, "ERROR") == 0) {
+            /* Depth-guarded wrapper: bounded for deeply nested ERROR trees. */
             kt_walk_top_level_for_resolution(ctx, c, enclosing_class_qn);
             continue;
         }
@@ -4515,9 +4647,10 @@ void kotlin_lsp_process_file(KotlinLSPContext *ctx, TSNode root) {
     }
 
     /* 1. Package + imports */
-    uint32_t nc = ts_node_named_child_count(root);
+    uint32_t nc = 0;
+    TSNode *top_kids = kt_named_children(ctx->arena, root, &nc);
     for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = ts_node_named_child(root, i);
+        TSNode c = top_kids[i];
         const char *kind = ts_node_type(c);
         if (strcmp(kind, "package_header") == 0) {
             const char *pkg = kt_parse_package_header(ctx, c);
@@ -5255,8 +5388,7 @@ static void kt_register_cross_def(CBMTypeRegistry *reg, CBMArena *arena, const C
         rt.is_interface = (strcmp(d->label, "Interface") == 0) || d->is_interface;
         if (field_map) {
             const KtCrossFieldList *fl =
-                (const KtCrossFieldList *)cbm_ht_get((CBMHashTable *)field_map,
-                                                     d->qualified_name);
+                (const KtCrossFieldList *)cbm_ht_get((CBMHashTable *)field_map, d->qualified_name);
             if (fl && fl->count > 0) {
                 rt.field_names = fl->names;
                 rt.field_types = fl->types;

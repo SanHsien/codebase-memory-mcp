@@ -22,6 +22,10 @@ static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
 static const CBMRegisteredType *c_resolve_field_owner_type(CLSPContext *ctx, const char *type_qn);
 static void c_process_function(CLSPContext *ctx, TSNode func_node);
 static bool c_process_configured_test_body(CLSPContext *ctx, TSNode scope);
+/* Nesting cap shared by the AST walks (calls, body items) and the type-text
+ * parser: past it a subtree is skipped, never a stack overflow. */
+#define C_LSP_MAX_WALK_DEPTH 512
+
 static void c_process_namespace(CLSPContext *ctx, TSNode ns_node);
 static void c_process_class(CLSPContext *ctx, TSNode class_node);
 static void c_process_body_child(CLSPContext *ctx, TSNode child);
@@ -2790,12 +2794,22 @@ static void c_neg_memo_free(CLSPContext *ctx) {
     c_u64_set_free(&ctx->field_ref_seen, &ctx->field_ref_seen_cap, &ctx->field_ref_seen_count);
 }
 
+/* Types one member lookup may visit across its whole alias/base-class walk.
+ * The walk has no visited set, so mutually-inheriting classes (A:B,C B:A,C
+ * C:A,B) made a MISSING member explore ~2^depth paths; the budget bounds a
+ * lookup to a fixed amount of work. A real hierarchy visits a handful. */
+#define C_LOOKUP_NODE_BUDGET 256
+
 static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const char *type_qn,
-                                                      const char *member_name, int depth) {
+                                                      const char *member_name, int depth,
+                                                      int *budget) {
     if (!type_qn || !member_name)
         return NULL;
     if (depth > CBM_LSP_MAX_LOOKUP_DEPTH)
         return NULL;
+    if (*budget <= 0)
+        return NULL;
+    (*budget)--;
 
     // Direct method lookup. Runs FIRST, before consulting the memo, so a real
     // direct-resolvable member (incl. a hash-collision victim, or one registered
@@ -2840,7 +2854,7 @@ static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const ch
             if (underlying && !cbm_type_is_unknown(underlying)) {
                 const char *alias_target_qn = type_to_qn(underlying);
                 if (alias_target_qn) {
-                    f = c_lookup_member_depth(ctx, alias_target_qn, member_name, depth + 1);
+                    f = c_lookup_member_depth(ctx, alias_target_qn, member_name, depth + 1, budget);
                     if (f)
                         return f;
                 }
@@ -2867,7 +2881,7 @@ static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const ch
     if (rt) {
         // Alias chain
         if (rt->alias_of) {
-            f = c_lookup_member_depth(ctx, rt->alias_of, member_name, depth + 1);
+            f = c_lookup_member_depth(ctx, rt->alias_of, member_name, depth + 1, budget);
             if (f)
                 return f;
         }
@@ -2875,7 +2889,8 @@ static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const ch
         // Base classes (embedded_types stores base class QNs)
         if (rt->embedded_types) {
             for (int i = 0; rt->embedded_types[i]; i++) {
-                f = c_lookup_member_depth(ctx, rt->embedded_types[i], member_name, depth + 1);
+                f = c_lookup_member_depth(ctx, rt->embedded_types[i], member_name, depth + 1,
+                                          budget);
                 if (f)
                     return f;
             }
@@ -2917,7 +2932,7 @@ static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const ch
             }
         }
         if (best_qn) {
-            f = c_lookup_member_depth(ctx, best_qn, member_name, depth + 1);
+            f = c_lookup_member_depth(ctx, best_qn, member_name, depth + 1, budget);
             if (f) {
                 return f;
             }
@@ -2933,7 +2948,8 @@ static const CBMRegisteredFunc *c_lookup_member_depth(CLSPContext *ctx, const ch
 
 const CBMRegisteredFunc *c_lookup_member(CLSPContext *ctx, const char *type_qn,
                                          const char *member_name) {
-    return c_lookup_member_depth(ctx, type_qn, member_name, 0);
+    int budget = C_LOOKUP_NODE_BUDGET;
+    return c_lookup_member_depth(ctx, type_qn, member_name, 0, &budget);
 }
 
 /* A member of a class c_resolve_scope_class_qn already pinned down: direct,
@@ -2942,7 +2958,8 @@ const CBMRegisteredFunc *c_lookup_member(CLSPContext *ctx, const char *type_qn,
  * class elsewhere -- the scope names exactly this class. */
 static const CBMRegisteredFunc *c_lookup_scope_member(CLSPContext *ctx, const char *class_qn,
                                                       const char *member_name) {
-    return c_lookup_member_depth(ctx, class_qn, member_name, 1);
+    int budget = C_LOOKUP_NODE_BUDGET;
+    return c_lookup_member_depth(ctx, class_qn, member_name, 1, &budget);
 }
 
 // True if any BASE class of type_qn (not type_qn itself) declares member_name —
@@ -4372,8 +4389,6 @@ static void c_emit_unresolved_call(CLSPContext *ctx, const char *expr_text, cons
 
 static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node);
 
-#define C_LSP_MAX_WALK_DEPTH 512
-
 /* Depth-guarded entry: the AST walk recurses per nesting level and crashed
  * with a stack overflow on deeply nested real-world C++ (bitcoin, SIGSEGV in
  * cbm_type_substitute under hundreds of recursive c_resolve_calls_in_node
@@ -4385,6 +4400,52 @@ static void c_resolve_calls_in_node(CLSPContext *ctx, TSNode node) {
     ctx->walk_depth++;
     c_resolve_calls_in_node_inner(ctx, node);
     ctx->walk_depth--;
+}
+
+/* True when `scope` (dotted, e.g. "utils" or "a.b") is evidence-backed as a
+ * NAMESPACE rather than an unresolved class: it is (a suffix of) the current
+ * namespace, a `using namespace` target, a namespace alias, or the qualifier of
+ * a registered free function named `bare`. `Other::run()` with `Other` declared
+ * nowhere is none of these and must not bind an unrelated free `run`. */
+static bool c_scope_is_known_namespace(CLSPContext *ctx, const char *scope, const char *bare) {
+    if (!scope || !scope[0])
+        return false;
+    size_t slen = strlen(scope);
+    const char *first_end = strchr(scope, '.');
+    char *first =
+        cbm_arena_strndup(ctx->arena, scope, first_end ? (size_t)(first_end - scope) : slen);
+    if (first && c_resolve_ns_alias(ctx, first))
+        return true;
+    const char *cur = ctx->current_namespace;
+    if (cur) {
+        size_t clen = strlen(cur);
+        if (clen >= slen && strcmp(cur + clen - slen, scope) == 0 &&
+            (clen == slen || cur[clen - slen - 1] == '.'))
+            return true;
+    }
+    for (int i = 0; i < ctx->using_ns_count; i++) {
+        const char *u = ctx->using_namespaces[i];
+        size_t ulen = strlen(u);
+        if (ulen >= slen && strcmp(u + ulen - slen, scope) == 0 &&
+            (ulen == slen || u[ulen - slen - 1] == '.'))
+            return true;
+    }
+    CBMFreeFuncIter it;
+    cbm_registry_free_funcs_by_short_name_chain(ctx->registry, bare, &it);
+    for (int index = cbm_free_func_iter_next(&it); index >= 0;
+         index = cbm_free_func_iter_next(&it)) {
+        if (index >= it.reg->func_count)
+            continue;
+        const CBMRegisteredFunc *cand = &it.reg->funcs[index];
+        if (cand->receiver_type || !cand->qualified_name)
+            continue;
+        const char *qname = cand->qualified_name;
+        for (const char *pos = strstr(qname, scope); pos; pos = strstr(pos + 1, scope)) {
+            if ((pos == qname || pos[-1] == '.') && pos[slen] == '.')
+                return true;
+        }
+    }
+    return false;
 }
 
 static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
@@ -4608,7 +4669,11 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                     }
                     // Namespace fallback: extract_defs may omit namespace from QN.
                     // "utils.create_logger" → try "create_logger" and "mod.create_logger"
-                    if (dot && ctx->module_qn) {
+                    // Only when the scope is a known namespace: `Other::run()` with an
+                    // undeclared `Other` is not a call to an unrelated free `run`.
+                    if (dot && ctx->module_qn &&
+                        c_scope_is_known_namespace(
+                            ctx, cbm_arena_strndup(ctx->arena, qn, (size_t)(dot - qn)), dot + 1)) {
                         const char *bare_name = dot + 1;
                         const CBMRegisteredFunc *nf =
                             cbm_registry_lookup_func(ctx->registry, bare_name);
@@ -5549,7 +5614,21 @@ static bool c_is_body_container(const char *kind) {
 
 // Process a top-level or nested declaration within a namespace/class body,
 // handling template_declaration wrapping.
+static void c_process_body_child_inner(CLSPContext *ctx, TSNode child);
+
+/* Depth-guarded entry: namespace / class / template / linkage-block bodies
+ * recurse through here, so 30000 nested `namespace a{` hung pass 2 (pass 1 was
+ * already capped). Past the cap the subtree is skipped. Shares walk_depth with
+ * the expression walk, so the combined nesting stays under one stack bound. */
 static void c_process_body_child(CLSPContext *ctx, TSNode child) {
+    if (ctx->walk_depth >= C_LSP_MAX_WALK_DEPTH)
+        return;
+    ctx->walk_depth++;
+    c_process_body_child_inner(ctx, child);
+    ctx->walk_depth--;
+}
+
+static void c_process_body_child_inner(CLSPContext *ctx, TSNode child) {
     if (ts_node_is_null(child))
         return;
     const char *ck = ts_node_type(child);
@@ -6095,9 +6174,13 @@ void c_lsp_process_file(CLSPContext *ctx, TSNode root) {
 // Parse C/C++ return type text into CBMType (for cross-file defs)
 // ============================================================================
 
-static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
-                                               const char *module_qn) {
+static const CBMType *c_parse_return_type_text_d(CBMArena *a, const char *text,
+                                                 const char *module_qn, int depth) {
     if (!text || !text[0])
+        return cbm_type_unknown();
+    /* Each level re-parses a shrunken copy of the text; unbounded nesting
+     * (`std::vector<` x 30000, a 30000-deep declarator) never terminated. */
+    if (depth >= C_LSP_MAX_WALK_DEPTH)
         return cbm_type_unknown();
 
     // Skip const/volatile qualifiers and the elaborated-type keyword: a member
@@ -6127,7 +6210,9 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
         while (rlen > 0 && ret_text[rlen - 1] == ' ')
             ret_text[--rlen] = '\0';
         const CBMType *rets[2] = {
-            rlen > 0 ? c_parse_return_type_text(a, ret_text, module_qn) : cbm_type_unknown(), NULL};
+            rlen > 0 ? c_parse_return_type_text_d(a, ret_text, module_qn, depth + 1)
+                     : cbm_type_unknown(),
+            NULL};
         return cbm_type_func(a, NULL, NULL, rets);
     }
 
@@ -6142,7 +6227,7 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
             size_t ilen = inner ? strlen(inner) : 0;
             while (ilen > 0 && inner[ilen - 1] == ' ')
                 inner[--ilen] = '\0';
-            return c_parse_return_type_text(a, inner, module_qn);
+            return c_parse_return_type_text_d(a, inner, module_qn, depth + 1);
         }
     }
 
@@ -6154,18 +6239,27 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
             size_t ilen = inner ? strlen(inner) : 0;
             while (ilen > 0 && inner[ilen - 1] == ' ')
                 inner[--ilen] = '\0';
-            return cbm_type_slice(a, c_parse_return_type_text(a, inner, module_qn));
+            return cbm_type_slice(a, c_parse_return_type_text_d(a, inner, module_qn, depth + 1));
         }
     }
 
-    // Pointer
+    // Pointer: peel the whole trailing run of `*` (and spaces) in a loop, so a
+    // long pointer chain costs one copy and no recursion per level.
     if (len > 0 && text[len - 1] == '*') {
-        char *inner = cbm_arena_strndup(a, text, len - 1);
-        // Trim trailing space
-        size_t ilen = strlen(inner);
-        while (ilen > 0 && inner[ilen - 1] == ' ')
-            inner[--ilen] = '\0';
-        return cbm_type_pointer(a, c_parse_return_type_text(a, inner, module_qn));
+        size_t end = len;
+        int stars = 0;
+        while (end > 0 && (text[end - 1] == '*' || text[end - 1] == ' ')) {
+            if (text[end - 1] == '*')
+                stars++;
+            end--;
+        }
+        if (depth + stars >= C_LSP_MAX_WALK_DEPTH)
+            return cbm_type_unknown();
+        char *inner = cbm_arena_strndup(a, text, end);
+        const CBMType *t = c_parse_return_type_text_d(a, inner, module_qn, depth + stars);
+        for (int k = 0; k < stars; k++)
+            t = cbm_type_pointer(a, t);
+        return t;
     }
 
     // Reference
@@ -6179,9 +6273,10 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
             inner[ilen - 1] = '\0';
             while (ilen > 1 && inner[ilen - 2] == ' ')
                 inner[--ilen - 1] = '\0';
-            return cbm_type_rvalue_ref(a, c_parse_return_type_text(a, inner, module_qn));
+            return cbm_type_rvalue_ref(a,
+                                       c_parse_return_type_text_d(a, inner, module_qn, depth + 1));
         }
-        return cbm_type_reference(a, c_parse_return_type_text(a, inner, module_qn));
+        return cbm_type_reference(a, c_parse_return_type_text_d(a, inner, module_qn, depth + 1));
     }
 
     // decltype(expr) — extract the type from the expression
@@ -6194,10 +6289,10 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
         // decltype(TypeName()) — constructor call → type is TypeName
         if (ilen >= 2 && inner[ilen - 1] == ')' && inner[ilen - 2] == '(') {
             inner[ilen - 2] = '\0';
-            return c_parse_return_type_text(a, inner, module_qn);
+            return c_parse_return_type_text_d(a, inner, module_qn, depth + 1);
         }
         // decltype(expr) — try to interpret as type name (covers decltype(x) where x is a type)
-        return c_parse_return_type_text(a, inner, module_qn);
+        return c_parse_return_type_text_d(a, inner, module_qn, depth + 1);
     }
 
     // Builtins
@@ -6240,14 +6335,14 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
             // Split by comma at nesting depth 0
             const CBMType *arg_types[16];
             int arg_count = 0;
-            int depth = 0;
+            int angle_nest = 0; /* not `depth`: that is the recursion-depth parameter */
             const char *arg_begin = args_text;
             for (const char *p = args_text;; p++) {
                 if (*p == '<')
-                    depth++;
+                    angle_nest++;
                 else if (*p == '>')
-                    depth--;
-                if ((*p == ',' && depth == 0) || *p == '\0') {
+                    angle_nest--;
+                if ((*p == ',' && angle_nest == 0) || *p == '\0') {
                     if (arg_count < 16) {
                         size_t alen = (size_t)(p - arg_begin);
                         char *arg = cbm_arena_strndup(a, arg_begin, alen);
@@ -6258,7 +6353,8 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
                         while (al > 0 && arg[al - 1] == ' ')
                             arg[--al] = '\0';
                         if (arg[0]) {
-                            arg_types[arg_count++] = c_parse_return_type_text(a, arg, module_qn);
+                            arg_types[arg_count++] =
+                                c_parse_return_type_text_d(a, arg, module_qn, depth + 1);
                         }
                     }
                     if (*p == '\0')
@@ -6294,6 +6390,11 @@ static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
         return cbm_type_named(a, cbm_arena_sprintf(a, "%s.%s", module_qn, text));
     }
     return cbm_type_named(a, text);
+}
+
+static const CBMType *c_parse_return_type_text(CBMArena *a, const char *text,
+                                               const char *module_qn) {
+    return c_parse_return_type_text_d(a, text, module_qn, 0);
 }
 
 /* Materialize the extractor's counted, positional parameter-type carrier.

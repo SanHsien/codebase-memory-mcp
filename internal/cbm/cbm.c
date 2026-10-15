@@ -872,6 +872,22 @@ static size_t receiver_ident(const char *recv_text, const char **out) {
 // the whole chain (not its first segment) keeps self.obj.recur() out: it
 // targets self's FIELD obj, a different object. super() is the parent class and
 // any other receiver (axios, console, ...) a different target. See #599.
+/* A Function/Method def considered for call-context attribution. */
+typedef struct {
+    int start;
+    int end;
+    int di;
+} call_ctx_cand_t;
+
+static int call_ctx_cand_cmp(const void *a, const void *b) {
+    const call_ctx_cand_t *x = a;
+    const call_ctx_cand_t *y = b;
+    if (x->start != y->start) {
+        return x->start < y->start ? -1 : 1;
+    }
+    return (x->di > y->di) - (x->di < y->di);
+}
+
 static bool is_self_receiver(const char *callee_name, const char *def_receiver) {
     if (!callee_name || !callee_name[0]) {
         return false;
@@ -2957,25 +2973,53 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
         d->param_count = pc;
     }
 
+    // Function/Method defs sorted by start line: the per-call lookup below used to
+    // scan every def for every call, which is calls x defs (seconds to tens of
+    // seconds on a class with tens of thousands of decorated methods).
+    call_ctx_cand_t *cands = def_count > 0 ? malloc((size_t)def_count * sizeof(*cands)) : NULL;
+    int cand_count = 0;
+    for (int di = 0; cands && di < def_count; di++) {
+        const CBMDefinition *d = &result->defs.items[di];
+        if (!d->name || !d->label ||
+            (strcmp(d->label, "Function") != 0 && strcmp(d->label, "Method") != 0)) {
+            continue;
+        }
+        cands[cand_count++] = (call_ctx_cand_t){(int)d->start_line, (int)d->end_line, di};
+    }
+    if (cand_count > 1) {
+        qsort(cands, (size_t)cand_count, sizeof(*cands), call_ctx_cand_cmp);
+    }
     for (int ci = 0; ci < orig_calls_count; ci++) {
         const CBMCall *c = &result->calls.items[ci];
         if (!c->callee_name || c->start_line <= 0) {
             continue;
         }
-        // Innermost enclosing Function/Method def by line range (smallest span).
+        // Innermost enclosing Function/Method def by line range (smallest span,
+        // lowest index on a tie). Candidates are sorted by start line, so scan back
+        // from the last one starting at or before the call; a candidate starting
+        // more than best_span lines before the call cannot have a smaller span.
         int best = -1;
         int best_span = -1;
-        for (int di = 0; di < def_count; di++) {
-            const CBMDefinition *d = &result->defs.items[di];
-            if (!d->name || !d->label ||
-                (strcmp(d->label, "Function") != 0 && strcmp(d->label, "Method") != 0)) {
-                continue;
+        int lo = 0;
+        int hi = cand_count;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (cands[mid].start <= c->start_line) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
-            if ((int)d->start_line <= c->start_line && c->start_line <= (int)d->end_line) {
-                int span = (int)d->end_line - (int)d->start_line;
-                if (best < 0 || span < best_span) {
+        }
+        for (int k = lo - 1; k >= 0; k--) {
+            const call_ctx_cand_t *cd = &cands[k];
+            if (best >= 0 && c->start_line - cd->start > best_span) {
+                break;
+            }
+            if (c->start_line <= cd->end) {
+                int span = cd->end - cd->start;
+                if (best < 0 || span < best_span || (span == best_span && cd->di < best)) {
                     best_span = span;
-                    best = di;
+                    best = cd->di;
                 }
             }
         }
@@ -3021,6 +3065,7 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
             result->defs.items[di].unguarded_recursion = true;
         }
     }
+    free(cands);
     free(has_self);
     free(has_guarded);
 

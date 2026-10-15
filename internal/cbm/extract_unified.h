@@ -66,6 +66,13 @@ typedef struct {
     const char *qn;
     uint32_t depth;
     uint32_t lexical_scope_id;
+    /* Index of the nearest frame at or below this one that carries a lexical
+     * scope id (-1: none), and of the nearest SCOPE_FUNC frame (-1: none).
+     * Both are fixed when the frame is pushed, so the innermost-lexical-scope
+     * and enclosing-function queries are O(1) instead of a scan of the whole
+     * stack per node (quadratic on a 30000-link `a.m().m()...` chain). */
+    int nearest_lexical_frame;
+    int nearest_func_frame;
     uint8_t kind;
     CBMInvocationKind invocation_kind;
     TSNode callee_expr;
@@ -127,6 +134,9 @@ typedef struct {
     const char *name;
     uint8_t kind;
 } CBMPythonDirective;
+
+/* Visited-ancestor stack of the usage classifiers; defined in extract_usages.c. */
+struct CBMUsageAncestors;
 
 // WalkState tracks scope context during the unified cursor walk.
 // Replaces parent-chain walks for enclosing_func_qn, import context, etc.
@@ -199,10 +209,30 @@ typedef struct {
      * which can only cost a suppression, never a true edge. */
     bool py_param_tracking_failed;
 
+    /* Ancestors of the node being classified, pushed and popped by the walk
+     * (extract_usages.c). The occurrence classifiers read it instead of
+     * climbing the tree: ts_node_parent and cursor resets are O(depth). */
+    struct CBMUsageAncestors *usage_ancestors;
+
     CBMLanguage language;
 
     os_type_map_t os_type_map; // ObjectScript variable → type mapping
 } WalkState;
+
+/* Innermost lexical scope id open on the walk stack (the module scope when no
+ * frame carries one). O(1): every frame records its nearest lexical frame. */
+static inline uint32_t cbm_walk_active_lexical_scope_id(const WalkState *state) {
+    if (!state) {
+        return 0;
+    }
+    if (state->scope_top > 0) {
+        int idx = state->scopes[state->scope_top - 1].nearest_lexical_frame;
+        if (idx >= 0) {
+            return state->scopes[idx].lexical_scope_id;
+        }
+    }
+    return state->root_lexical_scope_id;
+}
 
 /* #1912: is `name` bound as a parameter by a Python function or lambda scope
  * currently open on the walk stack? O(1). Answers false on any failure, so a

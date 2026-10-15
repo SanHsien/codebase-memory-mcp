@@ -26,10 +26,23 @@
 #include "cbm.h"
 #include "lsp/java_lsp.h"
 
+#include <foundation/platform.h>
+
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
+
+/* Append `n` copies of `s` to a heap buffer at *pos; the caller sized `buf`. */
+static void jlsp_append_n(char *buf, size_t *pos, const char *s, int n) {
+    size_t len = strlen(s);
+    for (int i = 0; i < n; i++) {
+        memcpy(buf + *pos, s, len);
+        *pos += len;
+    }
+    buf[*pos] = '\0';
+}
 
 static CBMFileResult *extract_java(const char *source) {
     return cbm_extract_file(source, (int)strlen(source), CBM_LANG_JAVA, "test", "Main.java", 0,
@@ -1806,6 +1819,177 @@ TEST(jlsp_real_corpus_parity_90_percent) {
     PASS();
 }
 
+/* ── Adversarial input: exponential re-walks / unbounded recursion ─── */
+
+/* Extract `src` and require it to finish well inside the budget. A pre-fix
+ * exponential walk never returns, so the bound is the regression signal. */
+static int jlsp_extract_bounded(const char *src, CBMFileResult **out) {
+    uint64_t t0 = cbm_now_ms();
+    CBMFileResult *r = extract_java(src);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    *out = r;
+    return elapsed < 20000 ? 0 : -1;
+}
+
+/* Drive only the Java LSP (parse + registry + resolve walks) on `src`. The
+ * per-file extractor passes that run before the LSP in cbm_extract_file are
+ * not under test here, so a pathologically deep input must not be charged to
+ * them. */
+static int jlsp_lsp_only_bounded(const char *src) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_java_lsp_cross(&arena, src, (int)strlen(src), "test.A", NULL, 0, NULL, NULL, 0, NULL,
+                           &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    return elapsed < 20000 ? 0 : -1;
+}
+
+TEST(jlsp_nested_bare_blocks_linear) {
+    /* 40 nested bare blocks: re-processing each block per level is 2^40. */
+    size_t cap = 256;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    jlsp_append_n(src, &pos, "class A{void m(){", 1);
+    jlsp_append_n(src, &pos, "{", 40);
+    jlsp_append_n(src, &pos, "x();", 1);
+    jlsp_append_n(src, &pos, "}", 40);
+    jlsp_append_n(src, &pos, "}}", 1);
+    CBMFileResult *r = NULL;
+    int rc = jlsp_extract_bounded(src, &r);
+    free(src);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(jlsp_long_binary_chain_linear) {
+    /* var t = a+a+...+a (60 operands): evaluating the left operand twice per
+     * level is 2^60. */
+    size_t cap = 512;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    jlsp_append_n(src, &pos, "class A{void m(int a){ var t = a", 1);
+    jlsp_append_n(src, &pos, "+a", 59);
+    jlsp_append_n(src, &pos, "; t.foo(); }}", 1);
+    CBMFileResult *r = NULL;
+    int rc = jlsp_extract_bounded(src, &r);
+    free(src);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(jlsp_deep_generic_type_bounded) {
+    /* Field type List<List<...<X>...>> nested 30000 deep: recursive type
+     * parsing must be depth-capped. */
+    enum { DEPTH = 30000 };
+    size_t cap = (size_t)DEPTH * 6 + 128;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    jlsp_append_n(src, &pos, "class A{ ", 1);
+    jlsp_append_n(src, &pos, "List<", DEPTH);
+    jlsp_append_n(src, &pos, "X", 1);
+    jlsp_append_n(src, &pos, ">", DEPTH);
+    jlsp_append_n(src, &pos, " x; }", 1);
+    int rc = jlsp_lsp_only_bounded(src);
+    free(src);
+    ASSERT_EQ(rc, 0);
+    PASS();
+}
+
+TEST(jlsp_deeply_nested_classes_bounded) {
+    /* class A{ class A{ ... }} nested 20000 deep: class-decl recursion and the
+     * AST patch passes must be depth-capped. */
+    enum { DEPTH = 20000 };
+    size_t cap = (size_t)DEPTH * 9 + 128;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t pos = 0;
+    src[0] = '\0';
+    jlsp_append_n(src, &pos, "class A{", DEPTH);
+    jlsp_append_n(src, &pos, "}", DEPTH);
+    int rc = jlsp_lsp_only_bounded(src);
+    free(src);
+    ASSERT_EQ(rc, 0);
+    PASS();
+}
+
+TEST(jlsp_deep_def_signature_text_bounded) {
+    /* A registered method whose return-type TEXT is List<List<...<X>...>> 30000
+     * deep: the text-based type parser recurses once per generic level and
+     * rescans the remaining text at each, so it must be depth-capped too. */
+    enum { DEPTH = 30000 };
+    size_t cap = (size_t)DEPTH * 6 + 128;
+    char *ret = malloc(cap);
+    ASSERT_NOT_NULL(ret);
+    size_t pos = 0;
+    ret[0] = '\0';
+    jlsp_append_n(ret, &pos, "List<", DEPTH);
+    jlsp_append_n(ret, &pos, "X", 1);
+    jlsp_append_n(ret, &pos, ">", DEPTH);
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out;
+    memset(&out, 0, sizeof(out));
+    CBMLSPDef defs[2];
+    memset(defs, 0, sizeof(defs));
+    defs[0].qualified_name = "p.Foo";
+    defs[0].short_name = "Foo";
+    defs[0].label = "Class";
+    defs[0].def_module_qn = "p";
+    defs[1].qualified_name = "p.Foo.make";
+    defs[1].short_name = "make";
+    defs[1].label = "Method";
+    defs[1].receiver_type = "p.Foo";
+    defs[1].def_module_qn = "p";
+    defs[1].return_types = ret;
+    const char *src = "package p; class C { void m(Foo f) { f.make(); } }";
+    uint64_t t0 = cbm_now_ms();
+    cbm_run_java_lsp_cross(&arena, src, (int)strlen(src), "p", defs, 2, NULL, NULL, 0, NULL, &out);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    cbm_arena_destroy(&arena);
+    free(ret);
+    ASSERT_TRUE(elapsed < 20000);
+    PASS();
+}
+
+TEST(jlsp_local_shadowing_field_unknown_type) {
+    /* The local `x` (type unknown: b.make() is unresolvable) shadows field
+     * Foo x; x.run() must NOT fall back to the field's type Foo. */
+    const char *src = "class Foo { void run() {} }\n"
+                      "class Bar {}\n"
+                      "class C { Foo x; void m(Bar b) { var x = b.make(); x.run(); } }\n";
+    CBMFileResult *r = extract_java(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(find_resolved(r, "C.m", "Foo.run"), -1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(jlsp_field_still_resolves_without_shadow) {
+    /* Control for the shadowing fix: with no local of that name the field type
+     * is still used. */
+    const char *src = "class Foo { void run() {} }\n"
+                      "class C { Foo x; void m() { x.run(); } }\n";
+    CBMFileResult *r = extract_java(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "C.m", "Foo.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── Suite registration ──────────────────────────────────────────── */
 
 void suite_java_lsp(void) {
@@ -1961,4 +2145,13 @@ void suite_java_lsp(void) {
 
     /* Real-corpus 90% parity benchmark (multi-class realistic Java). */
     RUN_TEST(jlsp_real_corpus_parity_90_percent);
+
+    /* Adversarial input: bounded work and local-shadows-field. */
+    RUN_TEST(jlsp_nested_bare_blocks_linear);
+    RUN_TEST(jlsp_long_binary_chain_linear);
+    RUN_TEST(jlsp_deep_generic_type_bounded);
+    RUN_TEST(jlsp_deeply_nested_classes_bounded);
+    RUN_TEST(jlsp_deep_def_signature_text_bounded);
+    RUN_TEST(jlsp_local_shadowing_field_unknown_type);
+    RUN_TEST(jlsp_field_still_resolves_without_shadow);
 }

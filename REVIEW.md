@@ -5,7 +5,8 @@
 ## 方法與環境
 
 - Windows 11 + MSYS2 CLANG64（clang 22.1），ASan＋UBSan 測試 runner。
-- 12 個區塊各自獨立讀碼審查（foundation／store、mcp／cypher、pipeline／discover／watcher、cli／daemon／ui、internal/cbm 抽取器、腳本與 workflow、config 編輯器、store 其餘與 supervisor、extract／LSP 本體；第二輪補 `store.c` 全檔、`extract_*.c`、`pass_route_nodes.c` 後段）。
+- 12 個區塊各自獨立讀碼審查（foundation／store、mcp／cypher、pipeline／discover／watcher、cli／daemon／ui、internal/cbm 抽取器、腳本與 workflow、config 編輯器、store 其餘與 supervisor、extract／LSP 本體；第二輪補 `store.c` 全檔、`extract_*.c`、`pass_route_nodes.c` 後段；第三輪逐行讀完抽取器 5 個大檔與全部 18 個 LSP 檔）。
+- 第三輪的 94 項審查說法逐項用產品執行檔實測（索引一個只含觸發輸入的 repo，看是否卡死、崩潰或圖錯誤，並以對照組排除案例寫法問題）：58 項重現、約 30 項不成立或屬設計，其餘併入相關修正。
 - 每個發現我都對照原始碼驗證，並盡量用真實二進位或真實 git 實測。能重現的先寫會失敗的測試、確認失敗，再修，修後重跑；實測不成立的剔除。
 
 ## 測試結果
@@ -13,7 +14,8 @@
 | | 通過 | 失敗 | 略過 |
 |---|---:|---:|---:|
 | 修正前（僅補齊環境） | 7726 | 78 | 68 |
-| 現在（同步上游到 `e71f23e` 後） | 8739 | 0 | 88 |
+| 同步上游到 `e71f23e` 後 | 8739 | 0 | 88 |
+| 第三輪修正後 | 8824 | 1 | 88 |
 
 另外：`scripts/test.sh` 的全部契約步驟通過；產品二進位回歸（watchdog、worker、scope、字串白名單等）通過。
 
@@ -81,6 +83,25 @@
 
 **測試與工具鏈（讓 Windows 開發者跑得起來）**：`README.md` 改為繁中後上游契約讀取失敗、預設碼頁讀 UTF-8 失敗、MSYS2 python 被當成 Unix、非管理員無法建立受保護暫存根、無符號連結權限時整個契約無法執行、scoop 契約陷阱。
 
+## 第三輪：抽取器與 LSP
+
+每項都先寫測試、確認修正前失敗（斷言失敗、ASan 報告、崩潰或逾時），修正後通過。深巢狀輸入在真實索引中會讓 worker 被判定卡死並剔除該檔案（預設判定 15 分鐘，最多重試數次）。
+
+| 範圍 | 修正 |
+|---|---|
+| 定義抽取 | C++ 3 萬層模板鏈 stack overflow；Elixir `when` 守衛、`defimpl`／`defprotocol` 的函式遺失，不同模組同名函式被合併；一行宣告多個名稱只留第一個（Go 欄位與變數、Java 欄位、C 全域）；TS 裝飾器之間有註解時路由消失；2 萬個加裝飾器的方法 TS 28 秒、Python 49 秒 |
+| 呼叫、頻道、用法 | Clojure 5000 層巢狀卡死；3 萬段 JS 方法鏈卡死；Go 反引號與 Python 前綴字串的路由遺失；`"user:" + id` 被記成頻道 `user:`；Go 大量遮蔽綁定 39 秒 |
+| 共用走訪與作用域 | 每個節點掃整個作用域堆疊（3 萬段鏈 59 秒→4 秒）；同一作用域大量名稱平方時間（6 萬行 39 秒→9 秒）；深層 JSON 180 秒→0.5 秒；YAML 超過 256 個巢狀鍵遺失資料；C++／Java／TS 深泛型與深層 YAML 的用法分類平方以上（Java 31 秒→0.5 秒） |
+| C/C++ LSP | 深命名空間 stack overflow；循環繼承成員查找卡死；未知作用域 `X::f()` 以 0.90 信心綁到無關自由函式 |
+| Java／Go LSP | 巢狀裸區塊與長 `+` 鏈指數時間；深泛型、深巢狀類別、Go 長運算式 stack overflow；Go 巢狀閉包指數時間；遮蔽欄位的區域變數被綁到欄位型別 |
+| Python LSP | 兩行遞迴 lambda 70 秒、21 GB；walrus、括號、深註解型別 stack overflow；`elif` 之後的 `else` 未解析；`list[A] \| None` 回傳型別失效 |
+| TS LSP | 深泛型型別文字 stack overflow；未標註回傳型別的函式內呼叫遺失；`??`、`\|\|` 被當成 number；`reduce` 累加器型別錯；跨檔 union 回傳型別被切成 tuple；回呼參數越界讀取（ASan）；大型 union 攤平遺失成員 |
+| Kotlin／Rust LSP | 深 lambda、if、類別、else-if 鏈 stack overflow 或卡死；`!is` 也做窄化；else 分支未解析；深泛型回傳型別 stack overflow；`impl<'a>` 的呼叫歸到檔案；rustdoc 堆疊緩衝區越界讀取等 3 個 ASan 錯誤 |
+| PHP／C# LSP | bindTo 巢狀指數時間；`&&` 鏈、括號、大括號、callee 深巢狀 stack overflow；6000 個方法的類別 77 秒；第 256 個頂層節點後的類別欄位遺失；C# 深巢狀 stack overflow；`_svc.Config.Get()` 綁到無關型別；型別索引每檔洩漏到長期 arena |
+| 其他 | 呼叫歸屬的「呼叫×定義」迴圈改為二分搜尋 |
+
+多處深度上限沒有生效的原因相同：區域的括號計數變數也叫 `depth`，遮蔽了新的深度參數（C、Rust 各一處，已改名）。
+
 ## 審查說法實測後不成立（已剔除）
 
 - JSON 大型陣列 O(N²)：1 萬到 16 萬元素索引時間都約 5 秒。
@@ -92,6 +113,7 @@
 - workflow 的 `${{ inputs.* }}`：只有寫入權限者能手動觸發，輸入非外部可控，且上游契約逐檔檢查標記，不改。
 - R 匯入收集的遞迴會 stack overflow：3 萬層巢狀呼叫實測不崩潰。
 - JS 深括號 callee 的尾遞迴會 stack overflow：3 萬層實測不崩潰。
+- 第三輪另有：SQL 巢狀子查詢、Go 括號鏈、PHP phpdoc 泛型與 trait 爆炸、Rust `+` 鏈與巨集、Kotlin 循環父型別、TS 循環介面、C# 括號鏈、C# 一行多欄位、Python metaclass 基底、Go map 參數型別、Go 嵌入深度與 type switch、Python lambda 依名稱登錄、Perl `shift` 綁定（同名邊來自名稱比對）、C 結構與函式同名，實測都不成立。
 
 ## 評估後不改
 
@@ -99,10 +121,12 @@
 - DATA_FLOWS 每條路由最多 64 個呼叫端、32 個 infra handler：有意的扇出上限。
 - 架構查詢 Louvain 分群 O(E·n)、`bfs_multi` 種子寫入未檢查、gRPC 路由 QN 超長截斷：效能或極端輸入，未見實際影響。
 - 架構的路由屬性用字串搜尋解析（非字串值時取錯欄位）：路由屬性由本程式產生，皆為字串。
+- JS `"/users/" + id + "/posts"` 記成 `/posts`：上游測試（issue #1249）明確要求「取最後一段字面路徑」，屬刻意設計。
 
 ## 未結
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
-- 抽取器沒有逐行讀完：`extract_defs.c`、`extract_calls.c`、`extract_usages.c`、`extract_unified.c` 大部分只做模式搜尋；各語言 LSP 檔案未審。這些不能視為已排除。
+- C++ `std::vector<` 8000 層這類輸入仍要約 49 秒，其中 46 秒在 vendored 的 tree-sitter C++ 解析器本身（不在本 fork 修改範圍）。
+- `py_lsp_scale` 的比例檢查（2000/100 < 200 倍）在 24 個平行工作下會失敗，單獨重跑通過（75.6 倍）。同負載下各跑 12 份對照：修正後 2000 個函式約 19.4 秒，未修改的版本約 31.6 秒，比例相近，屬上游既有的負載敏感測試（上游註解：已知超線性，#1527）。
 - `test-impact-artifact` workflow 暫停中，上游修好後恢復（見 [`docs/DECISIONS.md`](docs/DECISIONS.md)）。
 - 上游持續前進：本次同步到 `e71f23e`（2026-10-07，含 133 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-07.md`](docs/records/upstream-triage-2026-10-07.md)。

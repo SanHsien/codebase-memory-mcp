@@ -307,7 +307,27 @@ static void ts_emit_unresolved_call_at(TSLSPContext *ctx, const char *expr_text,
 //
 // Trims leading whitespace, leading ":" (TS type-annotation prefix produced by
 // `cbm_node_text` on a `type_annotation` AST node), and trailing whitespace/`;`.
+static const CBMType *parse_ts_type_text_impl(CBMArena *arena, const char *text,
+                                              const char *module_qn);
+
+/* Recursion cap for type-text parsing: nested generics/unions/functions recurse
+ * once per level, and each level re-copies its slice, so a crafted
+ * `Array<Array<...>>` thousands deep is quadratic and risks the native stack
+ * even under the work budget. Past the cap the slice degrades to UNKNOWN. */
+#define TS_TYPE_TEXT_MAX_DEPTH 64
+static _Thread_local int g_ts_type_text_depth;
+
 static const CBMType *parse_ts_type_text(CBMArena *arena, const char *text, const char *module_qn) {
+    if (g_ts_type_text_depth >= TS_TYPE_TEXT_MAX_DEPTH)
+        return cbm_type_unknown();
+    g_ts_type_text_depth++;
+    const CBMType *result = parse_ts_type_text_impl(arena, text, module_qn);
+    g_ts_type_text_depth--;
+    return result;
+}
+
+static const CBMType *parse_ts_type_text_impl(CBMArena *arena, const char *text,
+                                              const char *module_qn) {
     if (!text || !text[0])
         return cbm_type_unknown();
 
@@ -2126,6 +2146,38 @@ static const CBMType *ts_signature_for_call(TSLSPContext *ctx, TSNode function, 
     return ts_eval_expr_type(ctx, function);
 }
 
+static bool ts_type_is_nullish_builtin(const CBMType *t) {
+    return t && t->kind == CBM_TYPE_BUILTIN && t->data.builtin.name &&
+           (strcmp(t->data.builtin.name, "undefined") == 0 ||
+            strcmp(t->data.builtin.name, "null") == 0);
+}
+
+/* Drop null/undefined from a type: the value of `a ?? b` / `a || b` taken from
+ * `a` is never nullish. A lone nullish type becomes UNKNOWN. */
+static const CBMType *ts_strip_nullish(CBMArena *arena, const CBMType *t) {
+    if (!t)
+        return cbm_type_unknown();
+    if (ts_type_is_nullish_builtin(t))
+        return cbm_type_unknown();
+    if (t->kind != CBM_TYPE_UNION || !t->data.union_type.members)
+        return t;
+    int n = t->data.union_type.count;
+    const CBMType **kept =
+        (const CBMType **)cbm_arena_alloc(arena, (size_t)(n + 1) * sizeof(const CBMType *));
+    if (!kept)
+        return t;
+    int kept_count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!ts_type_is_nullish_builtin(t->data.union_type.members[i]))
+            kept[kept_count++] = t->data.union_type.members[i];
+    }
+    if (kept_count == n)
+        return t;
+    if (kept_count == 0)
+        return cbm_type_unknown();
+    return cbm_type_union(arena, kept, kept_count);
+}
+
 // Pull the underlying return type out of a FUNC signature, collapsing single-element
 // return arrays to that element.
 static const CBMType *return_type_of(CBMArena *arena, const CBMType *sig) {
@@ -2421,10 +2473,33 @@ const CBMType *ts_eval_expr_type(TSLSPContext *ctx, TSNode node) {
         if (!ts_node_is_null(left) && !ts_node_is_null(right)) {
             const CBMType *l = ts_eval_expr_type(ctx, left);
             const CBMType *r = ts_eval_expr_type(ctx, right);
-            if ((l && l->kind == CBM_TYPE_BUILTIN && l->data.builtin.name &&
-                 strcmp(l->data.builtin.name, "string") == 0) ||
-                (r && r->kind == CBM_TYPE_BUILTIN && r->data.builtin.name &&
-                 strcmp(r->data.builtin.name, "string") == 0)) {
+            TSNode op_node =
+                ts_node_child_by_field_name(node, "operator", TS_LSP_FIELD_LEN("operator"));
+            const char *op = ts_node_is_null(op_node) ? NULL : node_text(ctx, op_node);
+            if (op && (strcmp(op, "??") == 0 || strcmp(op, "||") == 0)) {
+                /* Either operand can be the value; the left one only when it is
+                 * not nullish/falsy, so its null/undefined members drop out. */
+                const CBMType *ls = ts_strip_nullish(ctx->arena, l);
+                if (cbm_type_is_unknown(ls)) {
+                    result = r;
+                } else if (cbm_type_is_unknown(r) || ls == r) {
+                    result = ls;
+                } else {
+                    const CBMType *members[3] = {ls, r, NULL};
+                    result = cbm_type_union(ctx->arena, members, 2);
+                }
+            } else if (op && strcmp(op, "&&") == 0) {
+                result = r; /* the value is the right operand when the left is truthy */
+            } else if (op &&
+                       (strcmp(op, "==") == 0 || strcmp(op, "===") == 0 || strcmp(op, "!=") == 0 ||
+                        strcmp(op, "!==") == 0 || strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+                        strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 ||
+                        strcmp(op, "instanceof") == 0 || strcmp(op, "in") == 0)) {
+                result = cbm_type_builtin(ctx->arena, "boolean");
+            } else if ((l && l->kind == CBM_TYPE_BUILTIN && l->data.builtin.name &&
+                        strcmp(l->data.builtin.name, "string") == 0) ||
+                       (r && r->kind == CBM_TYPE_BUILTIN && r->data.builtin.name &&
+                        strcmp(r->data.builtin.name, "string") == 0)) {
                 result = cbm_type_builtin(ctx->arena, "string");
             } else {
                 result = cbm_type_builtin(ctx->arena, "number");
@@ -2949,6 +3024,42 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
     }
 }
 
+/* Accumulator-shaped callbacks (`reduce<U>((acc: U, x: T) => U, initial: U)`):
+ * the first callback param and the callback's return are the same still-unbound
+ * type param, and the argument after the callback is the initial value that
+ * fixes it. Return `expected` with that param bound to the initial value's
+ * type; unchanged when the shape does not match or the initial type is
+ * unknown. */
+static const CBMType *ts_bind_accumulator_from_initial(TSLSPContext *ctx, const CBMType *expected,
+                                                       TSNode args, uint32_t cb_index,
+                                                       uint32_t argc) {
+    if (cb_index + 1 >= argc || !expected->data.func.param_types ||
+        !expected->data.func.return_types)
+        return expected;
+    const CBMType *acc = expected->data.func.param_types[0];
+    const CBMType *ret = expected->data.func.return_types[0];
+    if (!acc || !ret || acc->kind != CBM_TYPE_TYPE_PARAM || ret->kind != CBM_TYPE_TYPE_PARAM ||
+        !acc->data.type_param.name || !ret->data.type_param.name ||
+        strcmp(acc->data.type_param.name, ret->data.type_param.name) != 0)
+        return expected;
+    const CBMType *initial = ts_eval_expr_type(ctx, ts_node_named_child(args, cb_index + 1));
+    if (cbm_type_is_unknown(initial))
+        return expected;
+    uint32_t pc = 0;
+    while (expected->data.func.param_types[pc])
+        pc++;
+    const CBMType **params =
+        (const CBMType **)cbm_arena_alloc(ctx->arena, ((size_t)pc + 1) * sizeof(const CBMType *));
+    if (!params)
+        return expected;
+    for (uint32_t k = 0; k < pc; k++)
+        params[k] = expected->data.func.param_types[k];
+    params[0] = initial;
+    params[pc] = NULL;
+    return cbm_type_func(ctx->arena, expected->data.func.param_names, params,
+                         expected->data.func.return_types);
+}
+
 // Process an arrow_function or function_expression as a callback whose param types are
 // contextually typed by the enclosing call (e.g. `arr.map(x => x.length)` — `x` should
 // be bound to `arr`'s element type via Array<T>.map's `(x: T) => U` signature). The
@@ -2968,6 +3079,14 @@ static void process_callback_arrow(TSLSPContext *ctx, TSNode arrow, const CBMTyp
     TSNode bare_param =
         ts_node_child_by_field_name(arrow, "parameter", TS_LSP_FIELD_LEN("parameter"));
     int idx = 0;
+    /* param_types is NULL-terminated with no count: the arrow may declare more
+     * params than the callback type (map's (x, i, a)), so measure first and
+     * never index past the terminator. */
+    int expected_count = 0;
+    if (expected->data.func.param_types) {
+        while (expected->data.func.param_types[expected_count])
+            expected_count++;
+    }
     if (!ts_node_is_null(bare_param)) {
         // Single bare param: `x => ...`.
         const char *pk = ts_node_type(bare_param);
@@ -2989,9 +3108,7 @@ static void process_callback_arrow(TSLSPContext *ctx, TSNode arrow, const CBMTyp
             const char *pk = ts_node_type(p);
             const char *pname = NULL;
             const CBMType *expected_pt =
-                (expected->data.func.param_types && expected->data.func.param_types[idx])
-                    ? expected->data.func.param_types[idx]
-                    : NULL;
+                (idx < expected_count) ? expected->data.func.param_types[idx] : NULL;
 
             if (strcmp(pk, "identifier") == 0) {
                 pname = node_text(ctx, p);
@@ -3411,6 +3528,7 @@ static void process_node_inner(TSLSPContext *ctx, TSNode node) {
                     (i < param_count) ? fn_type->data.func.param_types[i] : NULL;
                 if ((strcmp(ak, "arrow_function") == 0 || strcmp(ak, "function_expression") == 0) &&
                     expected && expected->kind == CBM_TYPE_FUNC) {
+                    expected = ts_bind_accumulator_from_initial(ctx, expected, args, i, argc);
                     process_callback_arrow(ctx, arg, expected);
                 } else {
                     process_node(ctx, arg);
@@ -3781,6 +3899,13 @@ void ts_lsp_process_file(TSLSPContext *ctx, TSNode root) {
     if (ctx->dts_mode)
         return;
 
+    /* The pre-passes (infer_implicit_returns evaluates function bodies with
+     * their parameters still unbound) filled the expression memo with UNKNOWN
+     * for names this pass binds (`r` in `r.run()`). Start the main pass from an
+     * empty memo so each node is evaluated under its real scope; the old table
+     * stays in the arena. */
+    ctx->eval_memo = NULL;
+
     // Collect top-level children once (O(n)); both passes reuse the array.
     // See collect_children: indexing ts_node_child(root,i) here would be O(n²).
     uint32_t kn = 0;
@@ -4014,25 +4139,29 @@ void cbm_ts_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena) {
             const char *method;
             const CBMType *ret;
             const CBMType *cb_param0;
+            const CBMType *cb_param1; /* NULL = single-param callback */
             const CBMType *cb_ret;
         } cb_specs[] = {
-            {"forEach", t_void, t_T, t_void},
-            {"map", returns[11], t_T, tparam_U},
-            {"filter", t_arr_T, t_T, t_boolean},
-            {"find", t_T, t_T, t_boolean},
-            {"findIndex", t_number, t_T, t_boolean},
-            {"some", t_boolean, t_T, t_boolean},
-            {"every", t_boolean, t_T, t_boolean},
-            {"flatMap", t_arr_T, t_T, tparam_U},
-            {"sort", t_arr_T, t_T, t_number},
-            {"reduce", tparam_U, t_T, tparam_U},
-            {NULL, NULL, NULL, NULL},
+            {"forEach", t_void, t_T, NULL, t_void},
+            {"map", returns[11], t_T, NULL, tparam_U},
+            {"filter", t_arr_T, t_T, NULL, t_boolean},
+            {"find", t_T, t_T, NULL, t_boolean},
+            {"findIndex", t_number, t_T, NULL, t_boolean},
+            {"some", t_boolean, t_T, NULL, t_boolean},
+            {"every", t_boolean, t_T, NULL, t_boolean},
+            {"flatMap", t_arr_T, t_T, NULL, tparam_U},
+            {"sort", t_arr_T, t_T, NULL, t_number},
+            /* reduce<U>((acc: U, x: T) => U, initial: U): the accumulator comes
+             * first; the element is the second callback param. */
+            {"reduce", tparam_U, tparam_U, t_T, tparam_U},
+            {NULL, NULL, NULL, NULL, NULL},
         };
         for (int ci = 0; cb_specs[ci].method; ci++) {
             // Build callback FUNC type: (x: T) => returnType
-            const CBMType *cb_param_types[2] = {cb_specs[ci].cb_param0, NULL};
+            const CBMType *cb_param_types[3] = {cb_specs[ci].cb_param0, cb_specs[ci].cb_param1,
+                                                NULL};
             const CBMType *cb_returns[2] = {cb_specs[ci].cb_ret, NULL};
-            const char *cb_param_names[2] = {"x", NULL};
+            const char *cb_param_names[3] = {"x", cb_specs[ci].cb_param1 ? "y" : NULL, NULL};
             const CBMType *cb_func =
                 cbm_type_func(arena, cb_param_names, cb_param_types, cb_returns);
 
@@ -5810,25 +5939,13 @@ static void ts_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSPDe
             rf.min_params = -1;
             const CBMType **rets = NULL;
             if (d->return_types && d->return_types[0]) {
-                int n = 1;
-                for (const char *s = d->return_types; *s; s++)
-                    if (*s == '|')
-                        n++;
-                rets = (const CBMType **)cbm_arena_alloc(arena,
-                                                         (size_t)(n + 1) * sizeof(const CBMType *));
+                /* TS return text is ONE type (`User | undefined`,
+                 * `Promise<A | B>`); '|' is a union operator, not a multi-return
+                 * separator, so parse the whole text. */
+                rets = (const CBMType **)cbm_arena_alloc(arena, 2 * sizeof(const CBMType *));
                 if (rets) {
-                    int idx = 0;
-                    const char *start = d->return_types;
-                    for (const char *s = d->return_types;; s++) {
-                        if (*s == '|' || *s == '\0') {
-                            char *part = cbm_arena_strndup(arena, start, (size_t)(s - start));
-                            rets[idx++] = parse_ts_type_text(arena, part, d->def_module_qn);
-                            if (*s == '\0')
-                                break;
-                            start = s + 1;
-                        }
-                    }
-                    rets[idx] = NULL;
+                    rets[0] = parse_ts_type_text(arena, d->return_types, d->def_module_qn);
+                    rets[1] = NULL;
                 }
             }
             CBMTSLSPSignatureParserContext param_parser_ctx = {d->def_module_qn};
@@ -6076,28 +6193,14 @@ void cbm_run_ts_lsp_cross(CBMArena *arena, const char *source, int source_len,
             rf.qualified_name = d->qualified_name;
             rf.short_name = d->short_name;
             rf.min_params = -1;
-            // Return types from pipe-separated return_types text.
+            // Return type text: ONE TS type (a '|' is a union operator, never a
+            // multi-return separator — `User | undefined`, `Promise<A | B>`).
             const CBMType **rets = NULL;
             if (d->return_types && d->return_types[0]) {
-                int n = 1;
-                for (const char *s = d->return_types; *s; s++)
-                    if (*s == '|')
-                        n++;
-                rets = (const CBMType **)cbm_arena_alloc(arena,
-                                                         (size_t)(n + 1) * sizeof(const CBMType *));
+                rets = (const CBMType **)cbm_arena_alloc(arena, 2 * sizeof(const CBMType *));
                 if (rets) {
-                    int idx = 0;
-                    const char *start = d->return_types;
-                    for (const char *s = d->return_types;; s++) {
-                        if (*s == '|' || *s == '\0') {
-                            char *part = cbm_arena_strndup(arena, start, (size_t)(s - start));
-                            rets[idx++] = parse_ts_type_text(arena, part, d->def_module_qn);
-                            if (*s == '\0')
-                                break;
-                            start = s + 1;
-                        }
-                    }
-                    rets[idx] = NULL;
+                    rets[0] = parse_ts_type_text(arena, d->return_types, d->def_module_qn);
+                    rets[1] = NULL;
                 }
             }
             CBMTSLSPSignatureParserContext param_parser_ctx = {d->def_module_qn};

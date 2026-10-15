@@ -51,6 +51,13 @@
 #define CS_USING_INITIAL_CAP 16
 #define CS_NAMESPACE_INITIAL_CAP 8
 #define CS_LSP_PARENT_WALK_MAX 32
+/* Nesting cap for the declaration / call-resolution walks. Source nesting is
+ * attacker-controlled (`{{{...}}}`, nested namespaces/classes) and each level
+ * is a native stack frame; past the cap the subtree is skipped (calls stay
+ * unresolved). The counter is a balanced inc/dec around the inner body, so
+ * thread-local state is safe. */
+#define CS_WALK_MAX_DEPTH 256
+static _Thread_local int g_cs_walk_depth;
 
 extern const TSLanguage *tree_sitter_c_sharp(void);
 
@@ -367,7 +374,18 @@ static const char *cs_try_type_qn(CSLSPContext *ctx, const char *qn) {
  *   8. each `using A = X` alias substitution
  *   9. fall back to bare name (registry will fail; pipeline drops the call)
  */
+static const char *cs_resolve_type_name_ex(CSLSPContext *ctx, const char *raw,
+                                           bool allow_short_fallback);
+
 const char *cs_resolve_type_name(CSLSPContext *ctx, const char *raw) {
+    return cs_resolve_type_name_ex(ctx, raw, true);
+}
+
+/* allow_short_fallback=false skips step 9 (last-segment short-name match). A
+ * dotted member-access receiver such as `_svc.Config` is not a type name, and
+ * matching its last segment would bind it to an unrelated type `Config`. */
+static const char *cs_resolve_type_name_ex(CSLSPContext *ctx, const char *raw,
+                                           bool allow_short_fallback) {
     if (!raw || !*raw)
         return NULL;
     char *name = cs_normalize_name(ctx->arena, raw);
@@ -475,7 +493,7 @@ const char *cs_resolve_type_name(CSLSPContext *ctx, const char *raw) {
      * prefix with the file's namespace stack. This recovers cross-file
      * lookups that the namespace heuristics miss when the file's
      * `namespace` declaration doesn't line up with the directory tree. */
-    {
+    if (allow_short_fallback) {
         const char *the_short = cs_short_name(bare);
         if (the_short && *the_short) {
             const CBMRegisteredType *best = NULL;
@@ -1978,6 +1996,33 @@ static void cs_resolve_callable_arguments(CSLSPContext *ctx, TSNode call) {
     }
 }
 
+/* True when the leading segment of a receiver's text names a value (this/base,
+ * a local or parameter, or a field of the enclosing class) rather than a type.
+ * Values shadow type names, so such a receiver must take the instance path. */
+static bool cs_receiver_head_is_value(CSLSPContext *ctx, const char *recv_text) {
+    size_t n = strcspn(recv_text, ".(<[?!");
+    if (n == 0)
+        return false;
+    char *head = cbm_arena_strndup(ctx->arena, recv_text, n);
+    if (!head)
+        return false;
+    if (strcmp(head, "this") == 0 || strcmp(head, "base") == 0)
+        return true;
+    const CBMType *bound = cbm_scope_lookup(ctx->current_scope, head);
+    if (bound && bound->kind != CBM_TYPE_UNKNOWN)
+        return true;
+    if (ctx->enclosing_class_qn) {
+        const CBMRegisteredType *rt = cs_lookup_type_qn(ctx, ctx->enclosing_class_qn);
+        if (rt && rt->field_names) {
+            for (int i = 0; rt->field_names[i]; i++) {
+                if (strcmp(rt->field_names[i], head) == 0)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void cs_resolve_invocation(CSLSPContext *ctx, TSNode call) {
     TSNode fn = ts_node_child_by_field_name(call, "function", 8);
     if (ts_node_is_null(fn)) {
@@ -2024,8 +2069,9 @@ static void cs_resolve_invocation(CSLSPContext *ctx, TSNode call) {
 
         /* Static member call: receiver is a type identifier. */
         char *recv_text = ts_node_is_null(recv) ? NULL : cs_node_text(ctx, recv);
-        if (recv_text) {
-            const char *type_qn = cs_resolve_type_name(ctx, recv_text);
+        if (recv_text && !cs_receiver_head_is_value(ctx, recv_text)) {
+            const char *type_qn =
+                cs_resolve_type_name_ex(ctx, recv_text, strchr(recv_text, '.') == NULL);
             if (type_qn && cs_lookup_type_qn(ctx, type_qn)) {
                 const CBMRegisteredFunc *f = cs_lookup_method(ctx, type_qn, bare);
                 if (f) {
@@ -2213,7 +2259,17 @@ static void cs_resolve_object_creation(CSLSPContext *ctx, TSNode call) {
     cs_emit_resolved(ctx, tqn, "cs_ctor_synthetic", 0.85f);
 }
 
+static void cs_resolve_calls_in_node_inner(CSLSPContext *ctx, TSNode node);
+
 static void cs_resolve_calls_in_node(CSLSPContext *ctx, TSNode node) {
+    if (g_cs_walk_depth >= CS_WALK_MAX_DEPTH)
+        return;
+    g_cs_walk_depth++;
+    cs_resolve_calls_in_node_inner(ctx, node);
+    g_cs_walk_depth--;
+}
+
+static void cs_resolve_calls_in_node_inner(CSLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
         return;
     const char *kind = ts_node_type(node);
@@ -2503,7 +2559,17 @@ static void cs_process_function_like(CSLSPContext *ctx, TSNode node) {
 
 /* ── type declaration processing ────────────────────────────────── */
 
+static void cs_process_type_decl_inner(CSLSPContext *ctx, TSNode node);
+
 static void cs_process_type_decl(CSLSPContext *ctx, TSNode node) {
+    if (g_cs_walk_depth >= CS_WALK_MAX_DEPTH)
+        return;
+    g_cs_walk_depth++;
+    cs_process_type_decl_inner(ctx, node);
+    g_cs_walk_depth--;
+}
+
+static void cs_process_type_decl_inner(CSLSPContext *ctx, TSNode node) {
     const char *kind = ts_node_type(node);
     bool is_class = strcmp(kind, "class_declaration") == 0;
     bool is_struct = strcmp(kind, "struct_declaration") == 0;
@@ -2794,7 +2860,17 @@ static void cs_collect_imports(CSLSPContext *ctx, TSNode root) {
 
 /* ── namespace collection ───────────────────────────────────────── */
 
+static void cs_collect_namespace_inner(CSLSPContext *ctx, TSNode ns_node, bool file_scoped);
+
 static void cs_collect_namespace(CSLSPContext *ctx, TSNode ns_node, bool file_scoped) {
+    if (g_cs_walk_depth >= CS_WALK_MAX_DEPTH)
+        return;
+    g_cs_walk_depth++;
+    cs_collect_namespace_inner(ctx, ns_node, file_scoped);
+    g_cs_walk_depth--;
+}
+
+static void cs_collect_namespace_inner(CSLSPContext *ctx, TSNode ns_node, bool file_scoped) {
     TSNode nm = ts_node_child_by_field_name(ns_node, "name", 4);
     if (ts_node_is_null(nm))
         return;

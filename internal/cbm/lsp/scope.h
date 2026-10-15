@@ -25,11 +25,58 @@ typedef struct CBMScopeChunk {
     struct CBMScopeChunk* next;
 } CBMScopeChunk;
 
+/* A scope holding more than this many bindings gets a hash index over them.
+ * Below it the chunk scan is cheaper than hashing; above it the scan made N
+ * unique names in one scope O(N^2) (40000 top-level `xN = 1` lines: 14 s). */
+#define CBM_SCOPE_INDEX_MIN_BINDINGS 32
+
 typedef struct CBMScope {
     struct CBMScope* parent;
     CBMScopeChunk* chunks;
     CBMArena* arena;        // owning arena, propagated to children at push time
+    /* Open-addressing name index over this scope's own bindings (pointers into
+     * the chunks, which never move). NULL until the scope outgrows
+     * CBM_SCOPE_INDEX_MIN_BINDINGS, and NULL for good if its allocation failed:
+     * every reader then falls back to the chunk scan, so the index is purely an
+     * accelerator and never changes what a lookup returns. */
+    const CBMVarBinding **index;
+    int index_cap; // power of two, 0 when there is no index
+    int count;     // bindings recorded in this scope
+    bool index_failed;
 } CBMScope;
+
+static inline uint32_t cbm_scope_name_hash(const char *name) {
+    uint32_t h = 2166136261u; /* FNV-1a */
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h = (h ^ *p) * 16777619u;
+    }
+    return h;
+}
+
+/* The binding for name in THIS frame only, or NULL. */
+static inline CBMVarBinding *cbm_scope_find_local(const CBMScope *s, const char *name,
+                                                  uint32_t hash) {
+    if (s->index) {
+        uint32_t mask = (uint32_t)s->index_cap - 1U;
+        for (uint32_t i = hash & mask;; i = (i + 1U) & mask) {
+            const CBMVarBinding *b = s->index[i];
+            if (!b) {
+                return NULL;
+            }
+            if (strcmp(b->name, name) == 0) {
+                return (CBMVarBinding *)b;
+            }
+        }
+    }
+    for (const CBMScopeChunk *c = s->chunks; c != NULL; c = c->next) {
+        for (int i = 0; i < c->used; i++) {
+            if (c->bindings[i].name && strcmp(c->bindings[i].name, name) == 0) {
+                return (CBMVarBinding *)&c->bindings[i];
+            }
+        }
+    }
+    return NULL;
+}
 
 /* Return the complete nearest binding in one scope-chain walk, or NULL when
  * unbound. Keep this internal hot-path primitive inline: all language
@@ -39,13 +86,16 @@ static inline const CBMVarBinding *cbm_scope_lookup_binding(const CBMScope *scop
                                                             const char *name) {
     if (!name)
         return NULL;
+    uint32_t hash = 0;
+    bool hashed = false;
     for (const CBMScope *s = scope; s != NULL; s = s->parent) {
-        for (const CBMScopeChunk *c = s->chunks; c != NULL; c = c->next) {
-            for (int i = 0; i < c->used; i++) {
-                if (c->bindings[i].name && strcmp(c->bindings[i].name, name) == 0)
-                    return &c->bindings[i];
-            }
+        if (s->index && !hashed) {
+            hash = cbm_scope_name_hash(name);
+            hashed = true;
         }
+        const CBMVarBinding *b = cbm_scope_find_local(s, name, hash);
+        if (b)
+            return b;
     }
     return NULL;
 }
