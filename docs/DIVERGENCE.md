@@ -54,7 +54,7 @@
 | `tests/test_c_lsp.c` | — | 新增回歸測試 | 對應 c_lsp.c 修正 | 隨 c_lsp.c 一起處理 |
 | `tests/test_cs_lsp.c` | — | 新增回歸測試 | 對應 cs_lsp.c 修正 | 隨 cs_lsp.c 一起處理 |
 | `tests/test_go_lsp.c` | — | 新增回歸測試 | 對應 go_lsp.c 修正 | 隨 go_lsp.c 一起處理 |
-| `tests/test_java_lsp.c` | — | 新增回歸測試 | 對應 java_lsp.c 修正 | 隨 java_lsp.c 一起處理 |
+| `tests/test_java_lsp.c` | — | 新增回歸測試、裸區塊作用域復原測試 | 對應 java_lsp.c 修正 | 隨 java_lsp.c 一起處理 |
 | `tests/test_kotlin_lsp.c` | — | 新增回歸測試 | 對應 kotlin_lsp.c 修正 | 隨 kotlin_lsp.c 一起處理 |
 | `tests/test_php_lsp.c` | — | 新增回歸測試 | 對應 php_lsp.c 修正 | 隨 php_lsp.c 一起處理 |
 | `tests/test_py_lsp.c` | — | 新增回歸測試 | 對應 py_lsp.c 修正 | 隨 py_lsp.c 一起處理 |

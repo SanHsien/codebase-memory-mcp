@@ -1992,6 +1992,20 @@ TEST(jlsp_field_still_resolves_without_shadow) {
 
 /* ── Suite registration ──────────────────────────────────────────── */
 
+/* A bare block opens its own scope: a name shadowed inside it must not leak out, so
+ * the outer `x` still resolves to Foo after the block (guards the bare-block fix). */
+TEST(jlsp_bare_block_restores_outer_scope) {
+    const char *src = "class Foo { void run() {} }"
+                      "class C { void m() { Foo x = new Foo();"
+                      " { String x = \"inner\"; x.length(); } x.run(); } }";
+    CBMFileResult *r = extract_java(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "C.m", "String.length"), 0);
+    ASSERT_GTE(require_resolved(r, "C.m", "Foo.run"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 void suite_java_lsp(void) {
     /* Strings / java.lang */
     RUN_TEST(jlsp_string_length);
@@ -2154,4 +2168,5 @@ void suite_java_lsp(void) {
     RUN_TEST(jlsp_deep_def_signature_text_bounded);
     RUN_TEST(jlsp_local_shadowing_field_unknown_type);
     RUN_TEST(jlsp_field_still_resolves_without_shadow);
+    RUN_TEST(jlsp_bare_block_restores_outer_scope);
 }
