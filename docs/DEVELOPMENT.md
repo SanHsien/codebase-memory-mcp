@@ -37,7 +37,8 @@ scripts/test.sh --suites cypher CC=clang CXX=clang++   # 單一 suite（增量�
 make -f Makefile.cbm lint-format lint-no-suppress      # 格式與 NOLINT 檢查
 ```
 
-- daemon／IPC 類測試需要只有目前使用者可存取的暫存根：先執行 `scripts/ci/new-protected-temp-root.ps1 -Prefix cbm-ci-tmp- -ProtectDir <repo>\build\c`，再把輸出的路徑設為 `CBM_CI_TEMP_ROOT`、`TMP`、`TEMP`、`TMPDIR`。
+- daemon／IPC 類測試需要只有目前使用者可存取的暫存根：先執行 `scripts/ci/new-protected-temp-root.ps1 -Prefix cbm-ci-tmp- -ProtectDir <repo>\build\c`，再把輸出的路徑設為 `CBM_CI_TEMP_ROOT`、`TMP`、`TEMP`、`TMPDIR`。這支腳本要用 Windows PowerShell（`powershell.exe`）執行，PowerShell 7 沒有它用到的 `SetAccessControl`。
+- `cli_install_*` 測試會拒絕繼承了「Authenticated Users 可修改」的執行檔目錄。`build\c` 由 MSYS 建立時擁有者不同，`-ProtectDir` 改不了它的權限：改用 PowerShell 自建一個資料夾、以 `-ProtectDir` 保護，把 `test-runner.exe` 複製進去再執行。
 - 完整的 `scripts/test.sh` 契約步驟 0r 起需要建立符號連結的權限（開啟 Windows 開發人員模式或以系統管理員執行）。
 - `AppData\Local` 帶有額外 ACL 主體（如 AppContainer、沙箱群組）時，daemon 的祖先目錄安全檢查會拒絕，測試在啟動時就失敗（`failed to create isolated test cache and daemon runtime`）或 4 個 `daemon_ipc` 測試失敗。把 `LOCALAPPDATA` 指到使用者目錄下自建的空資料夾即可，例如 `export LOCALAPPDATA='C:\Users\<you>\cbm-la'`。
 

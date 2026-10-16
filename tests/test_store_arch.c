@@ -23,6 +23,7 @@
 #include "test_framework.h"
 #include <store/store.h>
 #include <sqlite3.h>
+#include "foundation/mem_core.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -294,6 +295,45 @@ TEST(arch_path_scoping) {
     cbm_store_architecture_free(&scoped_slash);
     cbm_store_architecture_free(&whole);
     cbm_store_architecture_free(&scoped);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* packages: count DESC, tied counts in name (BINARY) order. The aggregation
+ * runs off the label index now; a sorted GROUP BY follows the ORDER BY
+ * direction, which reversed the ties until the name tie-break was explicit. */
+TEST(arch_packages_tied_counts_in_name_order) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "test", "/tmp/test"), CBM_STORE_OK);
+    static const char *const pkg_names[] = {"gamma", "alpha", "Zeta", "beta",
+                                            "Alpha", "gamma", "beta"};
+    enum { PKG_NODES = 7, PKG_GROUPS = 5 };
+    for (int i = 0; i < PKG_NODES; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "test.pkg%d.%s", i, pkg_names[i]);
+        cbm_node_t n = {.project = "test",
+                        .label = "Package",
+                        .name = pkg_names[i],
+                        .qualified_name = qn,
+                        .file_path = "pkg/manifest.toml"};
+        ASSERT_TRUE(cbm_store_upsert_node(s, &n) > 0);
+    }
+    static const char *const want_names[] = {"beta", "gamma", "Alpha", "Zeta", "alpha"};
+    static const int want_counts[] = {2, 2, 1, 1, 1};
+    const char *aspects[] = {"packages"};
+    const char *paths[] = {NULL, "pkg"}; /* unscoped and path-scoped SQL */
+    for (int p = 0; p < 2; p++) {
+        cbm_architecture_info_t info;
+        ASSERT_EQ(cbm_store_get_architecture(s, "test", paths[p], aspects, 1, &info),
+                  CBM_STORE_OK);
+        ASSERT_EQ(info.package_count, PKG_GROUPS);
+        for (int i = 0; i < PKG_GROUPS; i++) {
+            ASSERT_STR_EQ(info.packages[i].name, want_names[i]);
+            ASSERT_EQ(info.packages[i].node_count, want_counts[i]);
+        }
+        cbm_store_architecture_free(&info);
+    }
     cbm_store_close(s);
     PASS();
 }
@@ -619,6 +659,145 @@ TEST(adr_delete_not_found) {
 
     ASSERT_TRUE(cbm_store_adr_delete(s, "nonexistent") != CBM_STORE_OK);
 
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Doc -> code candidates: a database without the table reads as "none";
+ * a replace swaps exactly one project's rows; reads go highest p first (then
+ * score) in both directions. */
+TEST(doc_candidates_replace_and_get) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_doc_candidate_t *got = NULL;
+    int n = -1;
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", "p.secA", NULL, 5, &got, &n),
+              CBM_STORE_NOT_FOUND);
+
+    const cbm_doc_candidate_t rows[] = {
+        {.section_qn = "p.secA",
+         .target_qn = "p.f2",
+         .rank = 2,
+         .score = 0.25,
+         .p = 0.36,
+         .evidence = "{\"shared_terms\":3,\"name_tokens\":0}"},
+        {.section_qn = "p.secA",
+         .target_qn = "p.f1",
+         .rank = 1,
+         .score = 0.45,
+         .p = 0.548,
+         .evidence = "{\"shared_terms\":6,\"name_tokens\":1}"},
+        {.section_qn = "p.secB",
+         .target_qn = "p.f1",
+         .rank = 1,
+         .score = 0.32,
+         .p = 0.42,
+         .evidence = ""},
+    };
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "p", rows, 3), CBM_STORE_OK);
+    const cbm_doc_candidate_t other = {.section_qn = "q.secA",
+                                       .target_qn = "q.f9",
+                                       .rank = 1,
+                                       .score = 0.5,
+                                       .p = 0.548,
+                                       .evidence = ""};
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "q", &other, 1), CBM_STORE_OK);
+
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", "p.secA", NULL, 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(got[0].target_qn, "p.f1");
+    ASSERT_EQ(got[0].rank, 1);
+    ASSERT_STR_EQ(got[0].evidence, "{\"shared_terms\":6,\"name_tokens\":1}");
+    ASSERT_STR_EQ(got[1].target_qn, "p.f2");
+    cbm_store_doc_candidates_free(got, n);
+
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", NULL, "p.f1", 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(got[0].section_qn, "p.secA");
+    ASSERT_STR_EQ(got[1].section_qn, "p.secB");
+    cbm_store_doc_candidates_free(got, n);
+
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", NULL, "p.f1", 1, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 1);
+    cbm_store_doc_candidates_free(got, n);
+
+    /* a replace drops every earlier row of the project, and only of it */
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "p", &rows[2], 1), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", "p.secA", NULL, 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 0);
+    cbm_store_doc_candidates_free(got, n);
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", "p.secB", NULL, 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 1);
+    cbm_store_doc_candidates_free(got, n);
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "q", "q.secA", NULL, 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 1);
+    cbm_store_doc_candidates_free(got, n);
+
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "p", NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", NULL, "p.f1", 5, &got, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 0);
+    cbm_store_doc_candidates_free(got, n);
+
+    /* exactly one of section / target */
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", NULL, NULL, 5, &got, &n), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_doc_candidates_get(s, "p", "p.secA", "p.f1", 5, &got, &n), CBM_STORE_ERR);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Whole-file candidates of a path: the rows whose target is the path's File
+ * node or a Folder holding it -- never a sibling folder sharing a name prefix
+ * (pkg/mailer, pk), a function in the file, or another project's rows. */
+TEST(doc_candidates_for_path_file_and_folders) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_doc_candidate_t *got = NULL;
+    int n = -1;
+    ASSERT_EQ(cbm_store_doc_candidates_for_path(s, "p", "pkg/mail/parse.py", 5, &got, &n),
+              CBM_STORE_NOT_FOUND);
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    const struct {
+        const char *label, *qn, *path;
+    } nodes[] = {{"File", "p.pkg.mail.parse.__file__", "pkg/mail/parse.py"},
+                 {"Function", "p.pkg.mail.parse.parse_mail", "pkg/mail/parse.py"},
+                 {"Folder", "p.pkg.mail", "pkg/mail"},
+                 {"Folder", "p.pkg", "pkg"},
+                 {"Folder", "p.pkg.mailer", "pkg/mailer"},
+                 {"Folder", "p.pk", "pk"}};
+    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+        cbm_node_t node = {.project = "p",
+                           .label = nodes[i].label,
+                           .name = nodes[i].qn,
+                           .qualified_name = nodes[i].qn,
+                           .file_path = nodes[i].path};
+        ASSERT_TRUE(cbm_store_upsert_node(s, &node) > 0);
+    }
+    const cbm_doc_candidate_t rows[] = {
+        {.section_qn = "p.docs.a", .target_qn = "p.pkg.mail.parse.__file__", .p = 0.5},
+        {.section_qn = "p.docs.b", .target_qn = "p.pkg.mail", .p = 0.7},
+        {.section_qn = "p.docs.c", .target_qn = "p.pkg", .p = 0.3},
+        {.section_qn = "p.docs.d", .target_qn = "p.pkg.mailer", .p = 0.9},
+        {.section_qn = "p.docs.e", .target_qn = "p.pk", .p = 0.9},
+        {.section_qn = "p.docs.f", .target_qn = "p.pkg.mail.parse.parse_mail", .p = 0.95},
+    };
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "p", rows, 6), CBM_STORE_OK);
+    const cbm_doc_candidate_t other = {
+        .section_qn = "q.docs.a", .target_qn = "p.pkg.mail", .p = 0.99};
+    ASSERT_EQ(cbm_store_doc_candidates_replace(s, "q", &other, 1), CBM_STORE_OK);
+
+    ASSERT_EQ(cbm_store_doc_candidates_for_path(s, "p", "pkg/mail/parse.py", 5, &got, &n),
+              CBM_STORE_OK);
+    ASSERT_EQ(n, 3);
+    ASSERT_STR_EQ(got[0].section_qn, "p.docs.b"); /* highest p first */
+    ASSERT_STR_EQ(got[1].section_qn, "p.docs.a");
+    ASSERT_STR_EQ(got[2].section_qn, "p.docs.c");
+    cbm_store_doc_candidates_free(got, n);
+
+    ASSERT_EQ(cbm_store_doc_candidates_for_path(s, "p", "pkg/mail/parse.py", 1, &got, &n),
+              CBM_STORE_OK);
+    ASSERT_EQ(n, 1);
+    cbm_store_doc_candidates_free(got, n);
+    ASSERT_EQ(cbm_store_doc_candidates_for_path(s, "p", "", 5, &got, &n), CBM_STORE_ERR);
     cbm_store_close(s);
     PASS();
 }
@@ -1226,7 +1405,7 @@ TEST(louvain_basic) {
     /* Triangle and pair different */
     ASSERT_TRUE(comm[1] != comm[4]);
 
-    free(result);
+    cbm_free(CBM_MEM_CLASS_OTHER, result);
     PASS();
 }
 
@@ -1235,7 +1414,7 @@ TEST(louvain_empty) {
     int count = 0;
     ASSERT_EQ(cbm_louvain(NULL, 0, NULL, 0, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 0);
-    free(result);
+    cbm_free(CBM_MEM_CLASS_OTHER, result);
     PASS();
 }
 
@@ -1246,7 +1425,7 @@ TEST(louvain_single_node) {
     ASSERT_EQ(cbm_louvain(nodes, 1, NULL, 0, &result, &count), CBM_STORE_OK);
     ASSERT_EQ(count, 1);
     ASSERT_EQ(result[0].node_id, 42);
-    free(result);
+    cbm_free(CBM_MEM_CLASS_OTHER, result);
     PASS();
 }
 
@@ -1309,7 +1488,45 @@ TEST(louvain_converges) {
     }
     ASSERT_TRUE(same_count >= 8);
 
-    free(result);
+    cbm_free(CBM_MEM_CLASS_OTHER, result);
+    PASS();
+}
+
+/* Both the populated graph and isolated-node path return exactly one owned
+ * output block. The Louvain compatibility entry point shares this contract. */
+TEST(leiden_result_memory_core_ownership) {
+    int64_t nodes[] = {1, 2, 3};
+    cbm_louvain_edge_t edges[] = {{1, 2}, {2, 3}};
+    for (int wrapper = 0; wrapper < 2; wrapper++) {
+        for (int connected = 0; connected < 2; connected++) {
+            size_t bytes = cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER);
+            size_t blocks = cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER);
+            cbm_louvain_result_t *result = NULL;
+            int count = 0;
+            const cbm_louvain_edge_t *input = connected ? edges : NULL;
+            int edge_count = connected ? 2 : 0;
+            int rc = wrapper ? cbm_louvain(nodes, 3, input, edge_count, &result, &count)
+                             : cbm_leiden(nodes, 3, input, edge_count, 1.0, &result, &count);
+            ASSERT_EQ(rc, CBM_STORE_OK);
+            ASSERT_EQ(count, 3);
+            ASSERT_NOT_NULL(result);
+            ASSERT_EQ(cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER), blocks + 1);
+            ASSERT_TRUE(cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER) >=
+                        bytes + 3 * sizeof(*result));
+            cbm_free(CBM_MEM_CLASS_OTHER, result);
+            ASSERT_EQ(cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER), bytes);
+            ASSERT_EQ(cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER), blocks);
+        }
+    }
+    size_t bytes = cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER);
+    size_t blocks = cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER);
+    cbm_louvain_result_t *result = NULL;
+    int count = -1;
+    ASSERT_EQ(cbm_leiden(NULL, 0, NULL, 0, 1.0, &result, &count), CBM_STORE_OK);
+    ASSERT_NULL(result);
+    ASSERT_EQ(count, 0);
+    ASSERT_EQ(cbm_mem_class_live_bytes(CBM_MEM_CLASS_OTHER), bytes);
+    ASSERT_EQ(cbm_mem_class_live_blocks(CBM_MEM_CLASS_OTHER), blocks);
     PASS();
 }
 
@@ -1443,7 +1660,7 @@ TEST(leiden_multilevel_collapses_noise) {
         }
         ASSERT_TRUE(same >= SZ - 1);
     }
-    free(result);
+    cbm_free(CBM_MEM_CLASS_OTHER, result);
     PASS();
 }
 
@@ -1475,8 +1692,8 @@ TEST(leiden_resolution_controls_granularity) {
     ASSERT_TRUE(n_hi > n_lo);
     ASSERT_TRUE(leiden_all_communities_connected(lo, N, edges, ne));
     ASSERT_TRUE(leiden_all_communities_connected(hi, N, edges, ne));
-    free(lo);
-    free(hi);
+    cbm_free(CBM_MEM_CLASS_OTHER, lo);
+    cbm_free(CBM_MEM_CLASS_OTHER, hi);
     PASS();
 }
 
@@ -1864,6 +2081,7 @@ SUITE(store_arch) {
     RUN_TEST(arch_hotspots_exclude_tests);
     RUN_TEST(arch_specific_aspects);
     RUN_TEST(arch_path_scoping);
+    RUN_TEST(arch_packages_tied_counts_in_name_order);
     RUN_TEST(arch_empty_project);
     RUN_TEST(arch_languages);
     RUN_TEST(arch_routes);
@@ -1879,6 +2097,8 @@ SUITE(store_arch) {
     RUN_TEST(adr_upsert);
     RUN_TEST(adr_delete);
     RUN_TEST(adr_delete_not_found);
+    RUN_TEST(doc_candidates_replace_and_get);
+    RUN_TEST(doc_candidates_for_path_file_and_folders);
     RUN_TEST(adr_parse_sections_basic);
     RUN_TEST(adr_parse_sections_all_six);
     RUN_TEST(adr_parse_sections_non_canonical);
@@ -1917,6 +2137,7 @@ SUITE(store_arch) {
     RUN_TEST(louvain_empty);
     RUN_TEST(louvain_single_node);
     RUN_TEST(louvain_converges);
+    RUN_TEST(leiden_result_memory_core_ownership);
     RUN_TEST(leiden_multilevel_collapses_noise);
     RUN_TEST(leiden_resolution_controls_granularity);
     RUN_TEST(arch_clusters_basic);

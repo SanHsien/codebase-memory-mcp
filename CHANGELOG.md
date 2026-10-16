@@ -13,3 +13,5 @@ English: [CHANGELOG.en.md](CHANGELOG.en.md)
 - 第二輪審查修正：store、路由資料流、抽取器、TOML 跨行陣列、檔案大小上限、配置檢查等，詳見 `REVIEW.md`。
 - 同步上游到 `e71f23e`（2026-10-07），新增 PR／issue 的增量分流紀錄。
 - 第三輪審查（抽取器與全部語言 LSP）：58 項實測重現的卡死、崩潰與錯誤結果修正，詳見 `REVIEW.md`。
+- 同步上游到 `ec6427c`（v0.12.0，2026-10-16），新增 PR／issue 的增量分流紀錄；恢復 `test-impact-artifact` workflow。
+- 修正 Windows：repo 內名為 `nul` 的檔案讓每次索引都中止（上游 issue #2646）。

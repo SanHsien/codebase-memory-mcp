@@ -107,8 +107,8 @@ SURFACES=(
     "pkg/go/cmd/codebase-memory-mcp/main.go|release"
     "pkg/chocolatey/codebase-memory-mcp.nuspec|release"
     "pkg/chocolatey/tools/chocolateyInstall.ps1|release"
-    "pkg/homebrew/Formula/codebase-memory-mcp.rb|pin:0.10.3"
     "pkg/scoop/codebase-memory-mcp.json|release"
+    "pkg/homebrew/Formula/codebase-memory-mcp.rb|pin:0.10.3"
     "pkg/aur/PKGBUILD|pin:0.8.1"
     "pkg/aur/.SRCINFO|pin:0.8.1"
 )

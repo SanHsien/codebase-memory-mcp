@@ -14,7 +14,7 @@
 - **全部本機執行**：不需 API 金鑰、不需 Docker 或語言 runtime，程式碼不外傳。
 - **單一純 C 執行檔**：macOS／Linux／Windows，內含 tree-sitter 語法（上游標示 162 種語言）。
 - **17 個 MCP 工具**：搜尋、呼叫追蹤、架構、影響分析、Cypher 查詢、死碼偵測等。
-- **內建 3D 圖形介面**：`localhost:9749`。
+- **內建瀏覽器介面 CBM Lens Beta**：讀原始碼、看架構與呼叫圖、檢查索引涵蓋範圍、編輯架構決策紀錄；`codebase-memory-mcp daemon start --open --port=9749` 開啟 `http://127.0.0.1:9749`。上游 v0.12.0 起取代舊的 3D 圖形介面。
 - 授權 MIT，上游作者 DeusData。
 
 ## 快速使用（Windows）

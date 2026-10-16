@@ -123,10 +123,13 @@
 - 架構的路由屬性用字串搜尋解析（非字串值時取錯欄位）：路由屬性由本程式產生，皆為字串。
 - JS `"/users/" + id + "/posts"` 記成 `/posts`：上游測試（issue #1249）明確要求「取最後一段字面路徑」，屬刻意設計。
 
+## 同步後改用上游版本
+
+2026-10-16 同步時，上游自己修好以下問題，本 fork 的修正改用上游版本：Cypher AND/OR/XOR 長鏈與 UNION 長鏈（上游改成鏈結串列與迴圈，不再需要長度上限）、同一作用域大量名稱的平方時間（上游 #1527 的名稱索引）、呼叫歸屬的「呼叫×定義」迴圈。
+
 ## 未結
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 - C++ `std::vector<` 8000 層這類輸入仍要約 49 秒，其中 46 秒在 vendored 的 tree-sitter C++ 解析器本身（不在本 fork 修改範圍）。
 - `py_lsp_scale` 的比例檢查（2000/100 < 200 倍）在 24 個平行工作下會失敗，單獨重跑通過（75.6 倍）。同負載下各跑 12 份對照：修正後 2000 個函式約 19.4 秒，未修改的版本約 31.6 秒，比例相近，屬上游既有的負載敏感測試（上游註解：已知超線性，#1527）。
-- `test-impact-artifact` workflow 暫停中，上游修好後恢復（見 [`docs/DECISIONS.md`](docs/DECISIONS.md)）。
-- 上游持續前進：本次同步到 `e71f23e`（2026-10-07，含 133 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-07.md`](docs/records/upstream-triage-2026-10-07.md)。
+- 上游持續前進：最近一次同步到 `ec6427c`（2026-10-16，v0.12.0，707 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-16.md`](docs/records/upstream-triage-2026-10-16.md)。
