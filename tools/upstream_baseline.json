@@ -3,7 +3,7 @@
   "branch": "main",
   "reviewed_through": "ec6427c38176efcd37b28682e82f2491afda94be",
   "reviewed_date": "2026-10-16",
-  "reviewed_pr_through": 2654,
-  "reviewed_issue_through": 2649,
+  "reviewed_pr_through": 2658,
+  "reviewed_issue_through": 2657,
   "decision_log": "docs/DECISIONS.md"
 }

@@ -1,6 +1,6 @@
 # 上游 issue／PR 分流（2026-10-16，增量）
 
-範圍：上次基準（PR #2557、issue #2558）之後新增的 PR 65 筆、issue 30 筆。程式碼同步到 `ec6427c`（707 個提交，上游 v0.12.0 之後）。
+範圍：上次基準（PR #2557、issue #2558）之後新增的 PR 66 筆、issue 33 筆。程式碼同步到 `ec6427c`（707 個提交，上游 v0.12.0 之後）。
 
 已合併的 PR（43 筆）都已隨本次同步進入本 fork。其餘依標題分類，沒有逐筆重現；與本 fork 修正重疊的 PR 另有註記，上游合併後依 [`DIVERGENCE.md`](../DIVERGENCE.md) 的規則採用上游版本。本 fork 不在上游留言或開 PR。
 
@@ -15,6 +15,7 @@
 
 | # | 標題 | 狀態 | 決定 |
 |---:|---|---|---|
+| [2658](https://github.com/DeusData/codebase-memory-mcp/pull/2658) | fix(cli): allow Windows project-lock preparation to complete | OPEN | Windows：處理 issue #2656，隨上游合併後同步 |
 | [2654](https://github.com/DeusData/codebase-memory-mcp/pull/2654) | fix(docker): never invent a registry host for an image | OPEN | 隨上游合併後同步 |
 | [2653](https://github.com/DeusData/codebase-memory-mcp/pull/2653) | docs(readme): point the main CI badge at the release workflow | OPEN | 隨上游合併後同步 |
 | [2652](https://github.com/DeusData/codebase-memory-mcp/pull/2652) | chore(pkg): sync packaging metadata to v0.12.0 | OPEN | 隨上游合併後同步 |
@@ -85,6 +86,9 @@
 
 | # | 標題 | 狀態 | 決定 |
 |---:|---|---|---|
+| [2657](https://github.com/DeusData/codebase-memory-mcp/issues/2657) | v0.12.0 npm postinstall always fails: linux-amd64 binary (316 MB) exceeds the installer's own MAX_ARCHIVE_MEMBER_BYTES limit (256 MB) | OPEN | npm 安裝流程，平台中立，隨上游 |
+| [2656](https://github.com/DeusData/codebase-memory-mcp/issues/2656) | Windows: 100 ms CLI project-lock attempts can livelock before source parsing | OPEN | Windows：上游 PR #2658 處理中，隨上游 |
+| [2655](https://github.com/DeusData/codebase-memory-mcp/issues/2655) | Windows: graph DBs larger than 2 GiB silently fail daemon watch registration | OPEN | Windows：大於 2 GiB 的資料庫，與 PR #2622（64 位元檔案位移）同類；追蹤，上游處理後同步 |
 | [2649](https://github.com/DeusData/codebase-memory-mcp/issues/2649) | index_repository 导致 oom | OPEN | 平台中立，隨上游 |
 | [2647](https://github.com/DeusData/codebase-memory-mcp/issues/2647) | Indexing gap | CLOSED | 上游已關閉，不處理 |
 | [2646](https://github.com/DeusData/codebase-memory-mcp/issues/2646) | Windows: a file named `nul` in the repo makes every index_repository abort with aborted_previous_preserved (0.11.0) | OPEN | Windows：本機實測重現（名為 `nul` 的檔案讓每次索引都中止），本 fork 已修正並補回歸測試（`pipeline_incremental.c`，見 DIVERGENCE） |
