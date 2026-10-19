@@ -54,6 +54,10 @@ pwsh -NoProfile -File tools\bootstrap_dev.ps1
 | [`CHANGELOG.md`](CHANGELOG.md) | 本 fork 維護歷史 |
 | [`NOTICE.md`](NOTICE.md) | 來源與授權 |
 
+## 多 Agent 流水線
+
+本 repo 是 [agent-relay](https://github.com/SanHsien/agent-relay) 多 Agent 派工與驗收流水線的一環（角色：程式碼知識圖譜）。與 agent-relay 的整合規劃中（Phase 2）。協定規格與所有相關 repo 的總目錄見 agent-relay。
+
 ## 授權
 
 MIT，見 [`LICENSE`](LICENSE)。保留上游作者署名，見 [`NOTICE.md`](NOTICE.md)。

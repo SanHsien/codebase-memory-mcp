@@ -1088,6 +1088,10 @@ The [v0.11.0 release notes](https://github.com/DeusData/codebase-memory-mcp/rele
 
 The release also publishes [candidate scan results](https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/virustotal-candidate-results.tsv), [binary provenance](https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/release-candidates.tsv), and [selection records](https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/release-selection.tsv). For subsequent versions, use the scan evidence linked from the [latest release](https://github.com/DeusData/codebase-memory-mcp/releases/latest).
 
+## Multi-agent pipeline
+
+This repo is part of the [agent-relay](https://github.com/SanHsien/agent-relay) multi-agent dispatch and verification pipeline (role: code knowledge graph). Integration with agent-relay is planned (Phase 2). The protocol spec and the index of all related repos live in agent-relay.
+
 ## License
 
 MIT
