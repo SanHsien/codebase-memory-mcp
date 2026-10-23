@@ -1,6 +1,6 @@
 # 上游 issue／PR 分流（2026-10-24，增量）
 
-範圍：上次基準（PR 2658、issue 2657）之後新增的 PR 75 筆、issue 28 筆。程式碼分兩段同步：先到 `a7158ac`（上游 v0.12.1），再到 `10ab613`（共 294 個提交）。
+範圍：上次基準（PR 2658、issue 2657）之後新增的 PR 76 筆、issue 29 筆。程式碼分兩段同步：先到 `a7158ac`（上游 v0.12.1），再到 `10ab613`（共 294 個提交）。
 
 已合併的 PR（44 筆）都已隨本次同步進入本 fork。其餘依標題分類，沒有逐筆重現；與本 fork 修正重疊的 PR 另有註記，上游合併後依 [`DIVERGENCE.md`](../DIVERGENCE.md) 的規則採用上游版本。本 fork 不在上游留言或開 PR。
 
@@ -17,6 +17,7 @@
 
 | # | 標題 | 狀態 | 決定 |
 |---:|---|---|---|
+| [2777](https://github.com/DeusData/codebase-memory-mcp/pull/2777) | fix(daemon): log the effective auto_index_limit in daemon.autoindex.skipped | OPEN | 隨上游合併後同步 |
 | [2774](https://github.com/DeusData/codebase-memory-mcp/pull/2774) | extract: fold prefixed and triple-quoted Python string URLs | OPEN | 與本 fork `extract_calls.c` 的字串前綴／三引號剝除重疊；上游合併後採用上游版本並刪 DIVERGENCE 對應說明 |
 | [2771](https://github.com/DeusData/codebase-memory-mcp/pull/2771) | feat(registry): break a Rust suffix tie with the receiver field's type | OPEN | 隨上游合併後同步 |
 | [2770](https://github.com/DeusData/codebase-memory-mcp/pull/2770) | fix(rust): fold struct fields so cross-file field receivers resolve | OPEN | 隨上游合併後同步 |
@@ -97,6 +98,7 @@
 
 | # | 標題 | 狀態 | 決定 |
 |---:|---|---|---|
+| [2778](https://github.com/DeusData/codebase-memory-mcp/issues/2778) | feat: config switch to suppress the Claude Code SessionStart/SubagentStart reminders (per user and per project) | OPEN | 功能請求，平台中立，隨上游 |
 | [2773](https://github.com/DeusData/codebase-memory-mcp/issues/2773) | Direct same-file calls to static functions produce zero CALLS edges (empty trace_path callees) | OPEN | 同檔 static 函式呼叫沒有 CALLS 邊（標 windows，內容平台中立），隨上游 |
 | [2768](https://github.com/DeusData/codebase-memory-mcp/issues/2768) | Angular HttpClient calls can be linked to the wrong cross-repo route | OPEN | 平台中立，隨上游 |
 | [2763](https://github.com/DeusData/codebase-memory-mcp/issues/2763) | v0.12.0/v0.12.1 Linux release binaries SIGSEGV at startup on glibc 2.44 — bundled free() dereferences its segment table before init | OPEN | Linux 發行檔在 glibc 2.44 啟動崩潰，與 Windows 無關；上游 PR 2731 處理中，隨上游 |
