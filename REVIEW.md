@@ -16,6 +16,7 @@
 | 修正前（僅補齊環境） | 7726 | 78 | 68 |
 | 同步上游到 `e71f23e` 後 | 8739 | 0 | 88 |
 | 第三輪修正後 | 8824 | 1 | 88 |
+| 同步上游到 `10ab613` 並修正 TS 走訪上限後（2026-10-24） | 9850 | 0 | 94 |
 
 另外：`scripts/test.sh` 的全部契約步驟通過；產品二進位回歸（watchdog、worker、scope、字串白名單等）通過。
 
@@ -127,9 +128,13 @@
 
 2026-10-16 同步時，上游自己修好以下問題，本 fork 的修正改用上游版本：Cypher AND/OR/XOR 長鏈與 UNION 長鏈（上游改成鏈結串列與迴圈，不再需要長度上限）、同一作用域大量名稱的平方時間（上游 #1527 的名稱索引）、呼叫歸屬的「呼叫×定義」迴圈。
 
+2026-10-24 同步時：watcher 的 UTF-8 路徑改用上游版本（上游 PR 2639，fork 的 `watcher_stat` 移除，保留「磁碟機不存在視為不確定」）；Rust 泛型 impl 的 self 型別改用上游版本（`f75af00a`），fork 原本那兩段程式含原始 NUL 位元組，一併移除。
+
+同一次同步後，fork 的 `tslsp_walk_depth_cap_skips_pathologically_nested_calls` 在 ASan 下堆疊溢位。崩潰點是 `___chkstk_ms`；把上限調成 490 時通過、512 時崩潰，表示 TS 走訪每層約用 16 KiB，512 層剛好用完 8 MiB 主執行緒堆疊（同步前也只差一點點）。TS 的走訪上限改為共用上限的一半（預設 256）。
+
 ## 未結
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 - C++ `std::vector<` 8000 層這類輸入仍要約 49 秒，其中 46 秒在 vendored 的 tree-sitter C++ 解析器本身（不在本 fork 修改範圍）。
 - `py_lsp_scale` 的比例檢查（2000/100 < 200 倍）在 24 個平行工作下會失敗，單獨重跑通過（75.6 倍）。同負載下各跑 12 份對照：修正後 2000 個函式約 19.4 秒，未修改的版本約 31.6 秒，比例相近，屬上游既有的負載敏感測試（上游註解：已知超線性，#1527）。
-- 上游持續前進：最近一次同步到 `ec6427c`（2026-10-16，v0.12.0，707 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-16.md`](docs/records/upstream-triage-2026-10-16.md)。
+- 上游持續前進：最近一次同步到 `10ab613`（2026-10-24，經 v0.12.1，294 個新提交），之後的提交、PR、issue 由 `upstream-check` 持續提示；新增 PR／issue 的分流見 [`docs/records/upstream-triage-2026-10-24.md`](docs/records/upstream-triage-2026-10-24.md)。

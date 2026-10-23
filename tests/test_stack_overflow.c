@@ -12,7 +12,8 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "foundation/platform.h" /* cbm_now_ms */
-#include "lang_specs.h" /* cbm_ts_language — direct-parse GLR cap regression (#913) */
+#include "lang_specs.h"          /* cbm_ts_language — direct-parse GLR cap regression (#913) */
+#include "lsp/ts_lsp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -400,11 +401,11 @@ TEST(cpp_large_templated_header_no_crash_issue424) {
  * java_resolve_calls_in_node frames (bind_lambda_args), bitcoin → SIGSEGV
  * under deep c_resolve_calls_in_node frames (cbm_type_substitute via
  * c_adl_resolve), microsoft/TypeScript → SIGBUS under an unbounded
- * lookup_member_type cycle. The walks now carry depth guards; these
- * reproductions fork a child so a regression cannot kill the test runner
- * (the TS cyclic-type shape is only reachable with a real cross-file
- * registry, so that one is verified at the real-repo tier; the synthetic
- * cyclic fixture here guards the in-file path).
+ * lookup_member_type cycle. The walks now carry depth guards. Non-TS crash
+ * fixtures fork on POSIX and run in-process on Windows. TypeScript cycle work
+ * runs in-process on both platforms to assert test-only lookup counters.
+ * The synthetic single-file fixtures here guard the local inheritance path;
+ * real-repo scale extraction is checked separately.
  * ═══════════════════════════════════════════════════════════════════ */
 
 #if !defined(_WIN32)
@@ -671,9 +672,106 @@ TEST(lsp_ts_cyclic_types_no_crash) {
                       "interface D extends C { d: number; }\n"
                       "declare const a: A;\n"
                       "declare const c: C;\n"
-                      "function useIt(p: C) { return p.missing_member; }\n"
+                      /* Both lookup paths must traverse the inheritance cycle. */
+                      "function useIt(p: C) { p.missing(); return p.missing_member; }\n"
                       "const y = c.also_missing;\n";
-    ASSERT_FALSE(so_extract_crashes(src, CBM_LANG_TYPESCRIPT, "cycle.ts"));
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "cycle.ts");
+    ASSERT_NOT_NULL(r);
+    /* C and D each have one parent: <= 64 admitted visits per type, plus
+     * one attempted (possibly rejected) parent visit per admitted visit. */
+    ASSERT_GT(cbm_ts_lsp_test_max_member_lookup_steps(), 0);
+    ASSERT_GT(cbm_ts_lsp_test_max_method_lookup_steps(), 0);
+    ASSERT_LTE(cbm_ts_lsp_test_max_member_lookup_steps(), 2 * 64 * 2);
+    ASSERT_LTE(cbm_ts_lsp_test_max_method_lookup_steps(), 2 * 64 * 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(lsp_ts_branching_cycle_has_bounded_work) {
+    const char *src =
+        "interface A extends B, C {}\n"
+        "interface B extends A, C {}\n"
+        "interface C extends A, B {}\n"
+        "function useIt(value: A) { value.missing(); return value.missing_member; }\n";
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "branching-cycle.ts");
+    ASSERT_NOT_NULL(r);
+    /* A, B, C each have two parents: <= 64 admitted visits per type, plus
+     * two attempted (possibly rejected) parent visits per admitted visit. */
+    ASSERT_GT(cbm_ts_lsp_test_max_member_lookup_steps(), 0);
+    ASSERT_GT(cbm_ts_lsp_test_max_method_lookup_steps(), 0);
+    ASSERT_LTE(cbm_ts_lsp_test_max_member_lookup_steps(), 3 * 64 * 3);
+    ASSERT_LTE(cbm_ts_lsp_test_max_method_lookup_steps(), 3 * 64 * 3);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(lsp_ts_shallower_revisit_preserves_inherited_method) {
+    enum { CHAIN = 62, CAP = 16384 };
+    char *src = malloc(CAP);
+    ASSERT_NOT_NULL(src);
+    size_t used =
+        (size_t)snprintf(src, CAP,
+                         "interface Service { ping(): void; }\n"
+                         "interface Target { inherited(): void; inheritedField: Service; }\n"
+                         "interface Shared extends Target {}\n"
+                         "interface Root extends D0, Shared {}\n");
+    for (int i = 0; i < CHAIN; i++) {
+        const char *parent = i + 1 < CHAIN ? "D" : "Shared";
+        int wrote = i + 1 < CHAIN
+                        ? snprintf(src + used, CAP - used, "interface D%d extends %s%d {}\n", i,
+                                   parent, i + 1)
+                        : snprintf(src + used, CAP - used, "interface D%d extends Shared {}\n", i);
+        ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+        used += (size_t)wrote;
+    }
+    int wrote = snprintf(
+        src + used, CAP - used,
+        "function useIt(value: Root) { value.inherited(); value.inheritedField.ping(); }\n");
+    ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "shallower.ts");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    int inherited_method_found = 0;
+    int inherited_field_method_found = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "inherited")) {
+            inherited_method_found = 1;
+        }
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "ping")) {
+            inherited_field_method_found = 1;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_TRUE(inherited_method_found);
+    ASSERT_TRUE(inherited_field_method_found);
+    PASS();
+}
+
+TEST(lsp_ts_inherited_method_lookup) {
+    const char *src = "interface Base { inherited(): void; }\n"
+                      "interface Child extends Base {}\n"
+                      "function useIt(c: Child) { c.inherited(); }\n";
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "inherited.ts");
+    ASSERT_NOT_NULL(r);
+
+    int found = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "inherited")) {
+            found = 1;
+            break;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_TRUE(found);
     PASS();
 }
 
@@ -834,8 +932,8 @@ TEST(js_long_member_chain_no_hang) {
     *p++ = ';';
     *p = '\0';
     uint64_t t0 = cbm_now_ms();
-    CBMFileResult *r =
-        cbm_extract_file(src, (int)strlen(src), CBM_LANG_JAVASCRIPT, "so", "chain.js", 0, NULL, NULL);
+    CBMFileResult *r = cbm_extract_file(src, (int)strlen(src), CBM_LANG_JAVASCRIPT, "so",
+                                        "chain.js", 0, NULL, NULL);
     uint64_t ms = cbm_now_ms() - t0;
     free(src);
     ASSERT_NOT_NULL(r);
@@ -940,15 +1038,6 @@ TEST(go_many_shadow_bindings_no_slowdown) {
     PASS();
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * Suite registration
- * ═══════════════════════════════════════════════════════════════════ */
-
-/* Split into three sub-suites so parallel/sharded runs are not serialized
- * behind one ~4-minute suite (it was the wall-clock critical path: every
- * other suite finished underneath it). Pure re-registration — the 20
- * RUN_TEST entries are exactly the ones the single suite carried; the
- * before/after test-count parity is asserted in the shard runner. */
 /* The dbt Jinja walk recursed once per syntax level with no cap; deeply nested calls
  * overflowed the stack. Same depth as the other *_deep_* cases. */
 static char *so_nested_calls(const char *prefix, const char *suffix, int depth) {
@@ -1084,8 +1173,8 @@ TEST(yaml_nested_map_keys_exceed_256) {
     ASSERT_NOT_NULL(src);
     char *p = src;
     for (int i = 0; i < KEYS; i++) {
-        p += snprintf(p, sz - (size_t)(p - src), "k%d:\n  endpoint: https://svc%d.example.com/x\n", i,
-                      i);
+        p += snprintf(p, sz - (size_t)(p - src), "k%d:\n  endpoint: https://svc%d.example.com/x\n",
+                      i, i);
     }
     CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "many_maps.yaml");
     free(src);
@@ -1220,8 +1309,9 @@ static int so_count_key_path(const CBMFileResult *r, const char *path) {
 /* V2a: output contract of the YAML nested-key walk, small input. A leaf is
  * reported once per enclosing mapping chain suffix (a.b.url, b.url, url). */
 TEST(yaml_nested_output_unchanged) {
-    const char *src = "a:\n  b:\n    url: https://svc.example.com/hook\n  c: https://c.example.com/x\n"
-                      "list:\n  - m:\n      n: https://n.example.com/y\n";
+    const char *src =
+        "a:\n  b:\n    url: https://svc.example.com/hook\n  c: https://c.example.com/x\n"
+        "list:\n  - m:\n      n: https://n.example.com/y\n";
     CBMFileResult *r = extract(src, CBM_LANG_YAML, "so", "small.yaml");
     ASSERT_NOT_NULL(r);
     int abu = so_count_key_path(r, "a.b.url");
@@ -1301,6 +1391,14 @@ TEST(yaml_deep_nested_mappings_linear) {
     PASS();
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Suite registration
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Split into three sub-suites so parallel/sharded runs are not serialized
+ * behind one ~4-minute suite (it was the wall-clock critical path: every
+ * other suite finished underneath it). New regressions stay in the matching
+ * shard; the shard runner asserts aggregate test-count parity. */
 SUITE(stack_overflow_a) {
     cbm_init();
 
@@ -1321,6 +1419,9 @@ SUITE(stack_overflow_b) {
     RUN_TEST(dbt_deep_jinja_nesting_no_crash);
     RUN_TEST(perl_glr_deep_parse_recursion_capped);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);
+    RUN_TEST(lsp_ts_branching_cycle_has_bounded_work);
+    RUN_TEST(lsp_ts_shallower_revisit_preserves_inherited_method);
+    RUN_TEST(lsp_ts_inherited_method_lookup);
     RUN_TEST(lsp_python_deep_nesting_no_crash);
     RUN_TEST(lsp_go_deep_nesting_no_crash);
     RUN_TEST(lsp_php_deep_nesting_no_crash);

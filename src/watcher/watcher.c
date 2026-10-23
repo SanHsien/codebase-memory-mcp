@@ -51,36 +51,6 @@
 #include <stdatomic.h>
 #include <sys/stat.h>
 
-/* stat() that treats the path as UTF-8. The CRT's narrow stat() reads the bytes
- * in the ANSI code page, so a project root containing characters outside that
- * page fails (EILSEQ on Windows) and the watcher silently stops seeing the
- * project: no baseline, no change detection. Same wide-API pattern as
- * discover.c; POSIX keeps plain stat(). errno is preserved on failure. */
-static int watcher_stat(const char *path, struct stat *st) {
-#ifdef _WIN32
-    wchar_t *wpath = cbm_path_to_wide(path);
-    if (!wpath) {
-        errno = EINVAL;
-        return -1;
-    }
-    struct _stat64 wst;
-    int ret = _wstat64(wpath, &wst);
-    int saved = errno;
-    free(wpath);
-    if (ret != 0) {
-        errno = saved;
-        return -1;
-    }
-    memset(st, 0, sizeof(*st));
-    st->st_mode = wst.st_mode;
-    st->st_size = wst.st_size;
-    st->st_mtime = wst.st_mtime;
-    return 0;
-#else
-    return stat(path, st);
-#endif
-}
-
 /* ── Per-project state ──────────────────────────────────────────── */
 
 typedef struct {
@@ -552,14 +522,28 @@ static watcher_git_status_t git_repo_status(cbm_watcher_t *w, project_state_t *s
  * a `.git` file (the gitlink form used by linked worktrees and initialized
  * submodules). Deliberately a filesystem check, not a git invocation — the whole
  * point is to learn something `rev-parse` cannot tell us, because it walks up. */
+/* Preserve stat's link-following behavior while inspecting UTF-8 paths. */
+static int watcher_path_info(const char *path, cbm_path_info_t *info) {
+    int status = cbm_path_info_utf8(path, info);
+    if (status == CBM_PATH_INFO_OK && info->is_symlink) {
+        char canonical[CBM_SZ_4K];
+        if (!cbm_canonical_path(path, canonical, sizeof(canonical))) {
+            return CBM_PATH_INFO_UNAVAILABLE;
+        }
+        status = cbm_path_info_utf8(canonical, info);
+    }
+    return status;
+}
+
 static bool git_has_own_dot_git(const char *root_path) {
     char path[CBM_SZ_4K];
     int written = snprintf(path, sizeof(path), "%s/.git", root_path);
     if (written <= 0 || (size_t)written >= sizeof(path)) {
         return false;
     }
-    struct stat st;
-    return watcher_stat(path, &st) == 0 && (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode));
+    cbm_path_info_t info;
+    return watcher_path_info(path, &info) == CBM_PATH_INFO_OK &&
+           (info.is_directory || info.is_regular);
 }
 
 /* Does the ancestor repository actually track anything inside this directory?
@@ -1018,9 +1002,10 @@ typedef enum {
 #ifdef _WIN32
 /* Is the volume that holds `path` reachable right now? A missing directory on a
  * present drive was deleted; a missing directory because the drive is gone (an
- * unplugged USB disk, a dropped network share) is only unavailable. Both surface
- * as ENOENT, and the difference decides whether the cached index is deleted. UNC
- * paths are never proven present, so they are never pruned automatically. */
+ * unplugged USB disk, a removed drive letter) is only unavailable. Both report
+ * the path absent, and the difference decides whether the cached index is
+ * deleted. UNC paths are never proven present, so they are never pruned
+ * automatically. */
 static bool windows_volume_present(const char *path) {
     if ((path[0] == '/' || path[0] == '\\') && (path[1] == '/' || path[1] == '\\')) {
         return false;
@@ -1028,8 +1013,8 @@ static bool windows_volume_present(const char *path) {
     if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
         path[1] == ':') {
         char drive_root[4] = {path[0], ':', '/', '\0'};
-        struct stat st;
-        return watcher_stat(drive_root, &st) == 0;
+        cbm_path_info_t info;
+        return watcher_path_info(drive_root, &info) == CBM_PATH_INFO_OK && info.is_directory;
     }
     return true;
 }
@@ -1040,13 +1025,17 @@ static root_status_t root_status(const char *root_path, int *out_errno) {
     if (!root_path) {
         return ROOT_UNCERTAIN;
     }
-    struct stat st;
-    if (watcher_stat(root_path, &st) == 0) {
-        /* Exists but is no longer a directory → the root directory is gone. */
-        return S_ISDIR(st.st_mode) ? ROOT_PRESENT : ROOT_MISSING;
+    cbm_path_info_t info;
+    int status = watcher_path_info(root_path, &info);
+    if (status == CBM_PATH_INFO_OK) {
+        return info.is_directory ? ROOT_PRESENT : ROOT_MISSING;
     }
+#ifdef _WIN32
+    *out_errno = status == CBM_PATH_INFO_ABSENT ? ENOENT : EIO;
+#else
     *out_errno = errno;
-    if (!cbm_watcher_root_missing_errno(errno)) {
+#endif
+    if (status != CBM_PATH_INFO_ABSENT) {
         return ROOT_UNCERTAIN;
     }
 #ifdef _WIN32
@@ -1396,8 +1385,8 @@ static void publish_status(project_state_t *s, bool scanned) {
 
 /* Init baseline for a project: check if git, get HEAD, count files */
 static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
-    struct stat st;
-    if (watcher_stat(s->root_path, &st) != 0) {
+    cbm_path_info_t info;
+    if (watcher_path_info(s->root_path, &info) != CBM_PATH_INFO_OK || !info.is_directory) {
         cbm_log_warn("watcher.root_gone", "project", s->project_name, "path", s->root_path);
         s->baseline_done = true;
         s->is_git = false;
