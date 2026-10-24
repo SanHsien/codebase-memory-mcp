@@ -28,7 +28,6 @@ MAINTAINED_DOCUMENTS = (
     "FORK.md",
     "NOTICE.md",
     "AGENTS.md",
-    "CLAUDE.md",
     "GEMINI.md",
     "REVIEW.md",
     "CHANGELOG.md",
