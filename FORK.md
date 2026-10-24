@@ -3,7 +3,7 @@
 fork 自 [`DeusData/codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp)（MIT），保留完整 Git 歷史。產品本體以上游為準，本 fork 只加維護層：
 
 - 繁中 `README.md`（上游英文原文在 `README.en.md`）。
-- `AGENTS.md`（`CLAUDE.md`、`GEMINI.md` 為薄補丁）、`NOTICE.md`、`REVIEW.md`、`CHANGELOG.md`。
+- `AGENTS.md`（`GEMINI.md` 為薄補丁）、`NOTICE.md`、`REVIEW.md`、`CHANGELOG.md`。
 - Windows 維護 gate（`tools/dev_check.ps1`）、上游追蹤與分岔登記檢查（`tools/`）、對應 CI。
 - `docs/`：DEVELOPMENT、DECISIONS、DIVERGENCE、UPSTREAM。
 
