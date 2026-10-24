@@ -45,7 +45,7 @@ pwsh -NoProfile -File tools\bootstrap_dev.ps1
 | 文件 | 內容 |
 |---|---|
 | [`FORK.md`](FORK.md) | fork 目的、與上游差異、分支與 remote |
-| [`AGENTS.md`](AGENTS.md) | AI agent 單一真相源（[`GEMINI.md`](GEMINI.md) 為薄補丁） |
+| [`AGENTS.md`](AGENTS.md) | AI agent 單一真相源 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 架構、環境、指令、gate |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | 決策紀錄 |
 | [`docs/DIVERGENCE.md`](docs/DIVERGENCE.md) | 對上游檔案的分岔登記表 |

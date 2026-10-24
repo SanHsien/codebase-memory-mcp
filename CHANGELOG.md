@@ -16,3 +16,4 @@ English: [CHANGELOG.en.md](CHANGELOG.en.md)
 - 同步上游到 `ec6427c`（v0.12.0，2026-10-16），新增 PR／issue 的增量分流紀錄；恢復 `test-impact-artifact` workflow。
 - 修正 Windows：repo 內名為 `nul` 的檔案讓每次索引都中止（上游 issue #2646）。
 - 同步上游到 `a7158ac`（v0.12.1）與 `10ab613`（2026-10-24，共 294 個提交），新增 PR／issue 的增量分流紀錄；watcher UTF-8 路徑與 Rust 泛型 impl 改用上游版本；TS LSP 走訪上限減半（512 層在 ASan 下用完 8 MiB 堆疊）。
+- 刪除 `GEMINI.md`，內容併入 `AGENTS.md`。
