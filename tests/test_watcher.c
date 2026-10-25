@@ -535,7 +535,7 @@ TEST(watcher_missing_volume_is_never_pruned) {
     }
     if (!missing_root[0]) {
         prune_fixture_teardown(&f);
-        SKIP("every drive letter is in use");
+        FAIL("no free drive letter to stand in for a missing volume");
     }
 
     cbm_store_t *store = cbm_store_open_memory();

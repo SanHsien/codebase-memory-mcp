@@ -96,3 +96,5 @@
 | `tests/test_ts_lsp.c` | — | 新增深度守門測試、批次 F 回歸測試 | 對應 ts_lsp.c 修正 | 隨 ts_lsp.c 一起處理 |
 | `src/discover/gitignore_core.c` | `.gitignore` 比對區分大小寫 | Windows 上不分大小寫（與 `core.ignorecase=true` 的 git 一致） | `Build/` 在 Windows 的 git 會忽略 `build/`，索引卻會收進去（以真實 git 驗證） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_gitignore.c` | — | 新增大小寫比對測試 | 對應 gitignore_core.c 修正（上游 2026-10 把比對引擎從 gitignore.c 搬到此檔，修正隨之移植） | 隨 gitignore_core.c 一起處理 |
+| `graph-ui/package.json` | `vitest` 4.1.11，`monaco-editor` 底下的 `dompurify` 覆寫為 3.4.16 | `vitest` 4.1.12（Dependabot），`dompurify` 覆寫為 3.4.17 | 清掉 Dependabot 的 DOMPurify 警示（GHSA-cg2g-xh64-v4q7、GHSA-mrv2-3pqr-j5jr、GHSA-c6gr-qvv4-5v3f，皆 3.4.17 修正）；vitest 升級同上游 PR 2762 | 上游合併 PR 2762 或自己把 `dompurify` 覆寫升到 3.4.17 以上就採用上游版本並刪本列；否則保留 |
+| `graph-ui/package-lock.json` | 對應上游 `package.json` | 隨本表 `graph-ui/package.json` 重新產生 | 同上 | 與 `graph-ui/package.json` 一起處理；衝突時採用上游版本後重跑 `npm install --package-lock-only` |

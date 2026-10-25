@@ -1258,8 +1258,8 @@ static uint64_t so_cpp_template_climb_work(int depth) {
  * type references must grow with the input, not with its square. A 4x deeper
  * input costs at most 8x the steps (16x when quadratic). Counts cursor hops, so
  * it does not depend on the machine or on the vendored parser's speed. */
-TEST(cpp_deep_template_args_usage_work_linear) {
 #if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
+TEST(cpp_deep_template_args_usage_work_linear) {
     uint64_t small = so_cpp_template_climb_work(400);
     uint64_t big = so_cpp_template_climb_work(1600);
     ASSERT_TRUE(small != UINT64_MAX);
@@ -1268,10 +1268,8 @@ TEST(cpp_deep_template_args_usage_work_linear) {
            (unsigned long long)small, (unsigned long long)big);
     ASSERT_LT(big, small * 8 + 256);
     PASS();
-#else
-    SKIP("climb work counter needs CBM_CALL_REFERENCE_LOOKUP_TEST_API");
-#endif
 }
+#endif
 
 /* V1b: a Java field `List<List<...>>` nested 4000 deep (16-18 s at 3200). */
 TEST(java_deep_generics_usages_linear) {
@@ -1452,7 +1450,9 @@ SUITE(stack_overflow_c) {
     RUN_TEST(yaml_infra_sequence_items_exceed_512);
     RUN_TEST(yaml_nested_map_keys_exceed_256);
     RUN_TEST(cpp_deep_initializer_list_usages_linear);
+#if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
     RUN_TEST(cpp_deep_template_args_usage_work_linear);
+#endif
     RUN_TEST(java_deep_generics_usages_linear);
     RUN_TEST(ts_deep_generics_usages_linear);
     RUN_TEST(yaml_nested_output_unchanged);
