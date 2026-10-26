@@ -1,9 +1,9 @@
 {
   "repo": "https://github.com/DeusData/codebase-memory-mcp.git",
   "branch": "main",
-  "reviewed_through": "10ab613de30dfd573d0b251cd0ad648e1c7e5204",
-  "reviewed_date": "2026-10-25",
-  "reviewed_pr_through": 2783,
-  "reviewed_issue_through": 2789,
+  "reviewed_through": "8530c8cd1c1ac8e1e3d2962bc213a8c9025fea0a",
+  "reviewed_date": "2026-10-26",
+  "reviewed_pr_through": 2809,
+  "reviewed_issue_through": 2805,
   "decision_log": "docs/DECISIONS.md"
 }
