@@ -246,7 +246,7 @@ static void py_register_instance_field(PyLSPContext *ctx, const char *class_qn,
 static void py_bind_for_target(PyLSPContext *ctx, TSNode left, const CBMType *elem_type);
 static void py_register_lambda(PyLSPContext *ctx, const char *name, TSNode lambda_node);
 static void py_register_dict_literal(PyLSPContext *ctx, const char *name, TSNode dict_node);
-static int py_lookup_lambda_index(PyLSPContext *ctx, const char *name);
+static int py_lookup_lambda(PyLSPContext *ctx, const char *name);
 static const char *py_lookup_dict_dispatch(PyLSPContext *ctx, const char *var, const char *key);
 static void py_process_function(PyLSPContext *ctx, TSNode func_node, const char *container_qn);
 static void py_process_class(PyLSPContext *ctx, TSNode class_node);
@@ -896,11 +896,13 @@ static void py_register_lambda(PyLSPContext *ctx, const char *name, TSNode lambd
     }
     ctx->lambdas[ctx->lambda_count].name = cbm_arena_strdup(ctx->arena, name);
     ctx->lambdas[ctx->lambda_count].lambda_node = lambda_node;
+    ctx->lambdas[ctx->lambda_count].expanding = false;
     ctx->lambda_count++;
 }
 
-/* Index of the registered lambda for `name`, or -1. */
-static int py_lookup_lambda_index(PyLSPContext *ctx, const char *name) {
+/* Registry index of the lambda bound to `name`, or -1. An index, not a
+ * pointer: the registry array is replaced when it grows. */
+static int py_lookup_lambda(PyLSPContext *ctx, const char *name) {
     if (!ctx || !name)
         return -1;
     for (int i = 0; i < ctx->lambda_count; i++) {
@@ -3160,12 +3162,18 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
         /* These legacy entries have no lexical frame identity. During class
          * execution, leave lambda replay unresolved instead of bypassing a
          * local shadow or running the lambda against class locals. */
-        int lambda_idx = ctx->class_body_outer_scope ? -1 : py_lookup_lambda_index(ctx, fname);
-        TSNode lambda_node = lambda_idx >= 0 ? ctx->lambdas[lambda_idx].lambda_node : (TSNode){0};
-        if (!ts_node_is_null(lambda_node)) {
+        int lambda_idx = ctx->class_body_outer_scope ? -1 : py_lookup_lambda(ctx, fname);
+        if (lambda_idx >= 0) {
+            TSNode lambda_node = ctx->lambdas[lambda_idx].lambda_node;
             TSNode params = ts_node_child_by_field_name(lambda_node, "parameters", 10);
             TSNode body = ts_node_child_by_field_name(lambda_node, "body", 4);
             TSNode args = ts_node_child_by_field_name(call_node, "arguments", 9);
+            // A lambda that reaches itself again (directly or through another
+            // lambda) would re-walk its body once per nesting level up to the
+            // walk-depth cap, and two such calls in one body double the work
+            // per level. Walk each body at most once per chain.
+            if (ctx->lambdas[lambda_idx].expanding)
+                return;
             CBMScope *saved = ctx->current_scope;
             ctx->current_scope = py_scope_push_checked(ctx);
             // Bind each lambda param to the call-site arg's type.
@@ -3198,15 +3206,9 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
             ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.<lambda>",
                                                        prev_func ? prev_func : ctx->module_qn);
             if (!ts_node_is_null(body)) {
-                /* Re-entry guard: while this lambda's body is being walked its
-                 * name is hidden from the registry, so a self- or mutually
-                 * recursive call (`fib = lambda n: ... fib(n-1) + fib(n-2)`)
-                 * is not re-walked at every call site -- that was exponential.
-                 * Index-based: the registry may grow (realloc) during the walk. */
-                const char *hidden_name = ctx->lambdas[lambda_idx].name;
-                ctx->lambdas[lambda_idx].name = NULL;
+                ctx->lambdas[lambda_idx].expanding = true;
                 py_resolve_calls_in(ctx, body);
-                ctx->lambdas[lambda_idx].name = hidden_name;
+                ctx->lambdas[lambda_idx].expanding = false;
             }
             ctx->enclosing_func_qn = prev_func;
             py_scope_restore(ctx, saved);

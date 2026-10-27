@@ -35,12 +35,21 @@
 #include <process.h>
 #include <windows.h>
 #define cbm_writer_getpid _getpid
+/* long is 32 bits on Windows, so fseek/ftell cannot address past 2 GiB there. */
+#define cbm_writer_seek(fp, off, whence) _fseeki64((fp), (long long)(off), (whence))
+#define cbm_writer_tell(fp) ((int64_t)_ftelli64(fp))
 #else
 #include <unistd.h>
 #define cbm_writer_getpid getpid
+#define cbm_writer_seek(fp, off, whence) fseeko((fp), (off_t)(off), (whence))
+#define cbm_writer_tell(fp) ((int64_t)ftello(fp))
 #endif
 
 #define CBM_PAGE_SIZE 65536
+
+int64_t cbm_writer_page_offset(uint32_t page_num) {
+    return (int64_t)(page_num - SKIP_ONE) * CBM_PAGE_SIZE;
+}
 
 /* SQLite reserves the page containing the 1 GiB file offset (the "pending byte"
  * used for file locking on Windows). This page MUST be skipped during allocation
@@ -62,27 +71,6 @@ static inline uint32_t cbm_skip_pending_byte(uint32_t pgno) {
     return pgno == CBM_PENDING_BYTE_PAGE ? pgno + SKIP_ONE : pgno;
 }
 
-/* Page offsets pass 2 GiB on a large graph (page 32769 at 64 KB pages). `long` is 32 bits
- * on Windows, so the offset arithmetic and fseek/ftell must be 64-bit. */
-static int64_t page_file_offset(uint32_t pnum) {
-    return (int64_t)(pnum - SKIP_ONE) * CBM_PAGE_SIZE;
-}
-
-static int writer_seek(FILE *fp, int64_t offset, int whence) {
-#ifdef _WIN32
-    return _fseeki64(fp, (long long)offset, whence);
-#else
-    return fseeko(fp, (off_t)offset, whence);
-#endif
-}
-
-static int64_t writer_tell(FILE *fp) {
-#ifdef _WIN32
-    return (int64_t)_ftelli64(fp);
-#else
-    return (int64_t)ftello(fp);
-#endif
-}
 #define SCHEMA_FORMAT 4
 #define FILE_FORMAT 1
 #define SQLITE_VERSION 3046000 // 3.46.0
@@ -623,7 +611,8 @@ static void pb_flush_leaf(PageBuilder *pb) {
     // Write page to file. Skip the pending byte page (SQLite reserved).
     pb->next_page = cbm_skip_pending_byte(pb->next_page);
     uint32_t page_num = pb->next_page;
-    (void)writer_seek(pb->fp, page_file_offset(page_num), SEEK_SET);
+    int64_t offset = cbm_writer_page_offset(page_num);
+    (void)cbm_writer_seek(pb->fp, offset, SEEK_SET);
     (void)fwrite(pb->page, SKIP_ONE, CBM_PAGE_SIZE, pb->fp);
 
     // Record this leaf for interior page building
@@ -728,7 +717,7 @@ static int write_interior_page(PageBuilder *pb, uint8_t *page, int cell_count, i
     page[HDR_FRAGBYTES_OFF] = 0;
     put_u32(page + HDR_RIGHTCHILD_OFF, right_child_page);
 
-    (void)writer_seek(pb->fp, page_file_offset(pnum), SEEK_SET);
+    (void)cbm_writer_seek(pb->fp, cbm_writer_page_offset(pnum), SEEK_SET);
     (void)fwrite(page, SKIP_ONE, CBM_PAGE_SIZE, pb->fp);
 
     if (parent_count >= *parent_cap) {
@@ -1005,7 +994,7 @@ static uint32_t write_overflow_pages(FILE *fp, uint32_t *next_page, const uint8_
         if (prev_next_ptr_offset >= 0) {
             uint8_t ptr[BTREE_PTR_SIZE];
             put_u32(ptr, pnum);
-            (void)writer_seek(fp, prev_next_ptr_offset, SEEK_SET);
+            (void)cbm_writer_seek(fp, prev_next_ptr_offset, SEEK_SET);
             (void)fwrite(ptr, SKIP_ONE, BTREE_PTR_SIZE, fp);
         }
 
@@ -1019,9 +1008,9 @@ static uint32_t write_overflow_pages(FILE *fp, uint32_t *next_page, const uint8_
         put_u32(page, 0); // next-page pointer — 0 for now, backpatched on next iteration
         memcpy(page + BTREE_PTR_SIZE, data + offset, chunk);
 
-        int64_t page_offset = page_file_offset(pnum);
+        int64_t page_offset = cbm_writer_page_offset(pnum);
         prev_next_ptr_offset = page_offset;
-        (void)writer_seek(fp, page_offset, SEEK_SET);
+        (void)cbm_writer_seek(fp, page_offset, SEEK_SET);
         (void)fwrite(page, SKIP_ONE, CBM_PAGE_SIZE, fp);
 
         offset += chunk;
@@ -1298,7 +1287,7 @@ static uint32_t write_table_btree(FILE *fp, uint32_t *next_page, const uint8_t *
         put_u16(page + hdr + HDR_CELLCOUNT_OFF, 0);                     // 0 cells
         put_u16(page + hdr + HDR_CONTENT_OFF, (uint16_t)CBM_PAGE_SIZE); // content at end of page
         page[hdr + HDR_FRAGBYTES_OFF] = 0;                              // 0 fragmented bytes
-        (void)writer_seek(fp, page_file_offset(pnum), SEEK_SET);
+        (void)cbm_writer_seek(fp, cbm_writer_page_offset(pnum), SEEK_SET);
         (void)fwrite(page, SKIP_ONE, CBM_PAGE_SIZE, fp);
         return pnum;
     }
@@ -1351,7 +1340,7 @@ static uint32_t write_empty_index_leaf(FILE *fp, uint32_t *next_page) {
     put_u16(page + HDR_CELLCOUNT_OFF, 0);
     put_u16(page + HDR_CONTENT_OFF, (uint16_t)CBM_PAGE_SIZE);
     page[HDR_FRAGBYTES_OFF] = 0;
-    (void)writer_seek(fp, page_file_offset(pnum), SEEK_SET);
+    (void)cbm_writer_seek(fp, cbm_writer_page_offset(pnum), SEEK_SET);
     (void)fwrite(page, SKIP_ONE, CBM_PAGE_SIZE, fp);
     return pnum;
 }
@@ -2056,7 +2045,7 @@ static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, u
 
     write_sqlite_file_header(page1, next_page - SKIP_ONE);
 
-    (void)fseek(fp, 0, SEEK_SET);
+    (void)cbm_writer_seek(fp, 0, SEEK_SET);
     (void)fwrite(page1, SKIP_ONE, CBM_PAGE_SIZE, fp);
 
     for (int i = 0; i < master_count; i++) {
@@ -2070,12 +2059,12 @@ static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, u
 
 /* Pad file to exact page boundary. */
 static void pad_file_to_page_boundary(FILE *fp, uint32_t next_page) {
-    (void)writer_seek(fp, 0, SEEK_END);
-    int64_t file_size = writer_tell(fp);
-    int64_t expected_size = page_file_offset(next_page);
+    (void)cbm_writer_seek(fp, 0, SEEK_END);
+    int64_t file_size = cbm_writer_tell(fp);
+    int64_t expected_size = cbm_writer_page_offset(next_page);
     if (file_size < expected_size) {
         uint8_t zero = 0;
-        (void)writer_seek(fp, expected_size - SKIP_ONE, SEEK_SET);
+        (void)cbm_writer_seek(fp, expected_size - SKIP_ONE, SEEK_SET);
         (void)fwrite(&zero, SKIP_ONE, SKIP_ONE, fp);
     }
 }
