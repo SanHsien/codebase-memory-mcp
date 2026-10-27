@@ -132,6 +132,21 @@
 
 同一次同步後，fork 的 `tslsp_walk_depth_cap_skips_pathologically_nested_calls` 在 ASan 下堆疊溢位。崩潰點是 `___chkstk_ms`；把上限調成 490 時通過、512 時崩潰，表示 TS 走訪每層約用 16 KiB，512 層剛好用完 8 MiB 主執行緒堆疊（同步前也只差一點點）。TS 的走訪上限改為共用上限的一半（預設 256）。
 
+## 2026-10-28 深度掃描：fork 維護工具
+
+範圍：fork 自己加的 `tools/*.py`、`tools/*.ps1`、`.github/workflows/` 與 `.github/dependency-deferrals.json`；C 程式抽查三輪覆核後才加或有競態風險的 fork 改動（`pipeline_incremental.c`、`watcher.c`、`config_yaml_edit.c`）。`tools/check_upstream_updates.py` 是 repo-fleet-ops 的 canonical 複本，不在 fork 內修改。每項都先寫測試、確認修正前失敗。
+
+| 問題 | 位置 | 修復 |
+|---|---|---|
+| 上游檔被 `git mv` 改名時，porcelain `git diff` 預設偵測改名，只回報新路徑，消失的上游檔不會比對登記表，檢查照樣綠 | `tools/check_divergence.py` | `4cc66b82`（2026-10-28） |
+| PyPI 連不上、限流或套件改名（404）時，該列被標成 `fresh` 並以 0 結束 | `tools/check_dependency_freshness.py` | `f348e023`（2026-10-28） |
+| 連結檢查用 `exists()`：Windows 不分大小寫，`docs/development.md` 會通過但在 GitHub 是 404；未入版控的本機檔案也會通過 | `tools/check_links.py` | `69640114`（2026-10-28） |
+| Fork CI 的推送觸發排除 `src/**`、`internal/**`、`vendored/**`，只改 C 又漏登記的提交推上 main 時沒有任何分岔檢查，要等每週排程 | `.github/workflows/fork-ci.yml` | `0f7a0dd4`（2026-10-28） |
+
+另：ruff 0.17.3 已發佈，gate 規則（`--select E9,F`）實測通過，延後紀錄更新為 0.17.3（`ddabaffc`），下限不變。
+
+評估後不改：YAML 過期鎖回收在「檢查鎖的時間」與 `RemoveDirectoryW` 之間有競態，另一個程序若恰好在這段時間回收並重建鎖，會被刪掉。需要同時有崩潰殘留的鎖與兩個在微秒內並行的安裝程式，無法實際重現。
+
 ## 未結
 
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
