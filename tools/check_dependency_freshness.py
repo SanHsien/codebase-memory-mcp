@@ -149,6 +149,7 @@ def collect_status(packages: list[dict], deferrals: dict[str, tuple[str, str]]) 
             {
                 **package,
                 "latest": latest or "unknown",
+                "lookup_failed": latest is None,
                 "outdated": outdated,
                 "deferral": deferral,
             }
@@ -157,6 +158,10 @@ def collect_status(packages: list[dict], deferrals: dict[str, tuple[str, str]]) 
 
 
 def needs_review(row: dict) -> bool:
+    # A row whose PyPI lookup failed was never compared; calling it fresh would turn
+    # a network outage or a renamed package into a green check.
+    if row.get("lookup_failed"):
+        return True
     if not row["outdated"]:
         return False
     if row["hold"]:
@@ -181,7 +186,10 @@ def render_markdown(rows: list[dict]) -> str:
         file = row["file"]
         declared = row["declared_floor"] or row["raw_spec"] or "any"
         latest = row["latest"]
-        if needs_review(row):
+        if row.get("lookup_failed"):
+            status = "**UNKNOWN** (PyPI lookup failed)"
+            attention_count += 1
+        elif needs_review(row):
             status = "**OUTDATED**"
             attention_count += 1
         elif row["hold"]:
