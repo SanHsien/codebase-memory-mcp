@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -49,6 +51,33 @@ def _tracked(relative: str) -> bool:
     return result.returncode == 0
 
 
+@lru_cache(maxsize=1)
+def _tracked_paths() -> frozenset[str]:
+    """Every tracked file and every directory above one, as exact-case POSIX paths.
+
+    GitHub serves paths case-sensitively and has only what is committed. Windows and
+    macOS file systems ignore case, and a checkout holds ignored local files, so
+    `exists()` alone passes links that are 404s on GitHub.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    paths: set[str] = set()
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = raw.decode("utf-8", errors="surrogateescape")
+        paths.add(relative)
+        parent = relative.rpartition("/")[0]
+        while parent and parent not in paths:
+            paths.add(parent)
+            parent = parent.rpartition("/")[0]
+    return frozenset(paths)
+
+
 def iter_documents() -> list[Path]:
     missing = [
         relative
@@ -68,8 +97,19 @@ def _missing_relative(path: Path, target: str) -> str | None:
     file_part = unquote(target.split("#", 1)[0])
     if not file_part:
         return None
-    resolved = (path.parent / file_part).resolve()
-    if resolved.exists():
+    # normpath, not resolve(): on Windows resolve() rewrites the case to the on-disk
+    # spelling, which would hide exactly the mismatch this has to catch.
+    resolved = Path(os.path.normpath(path.parent / file_part))
+    try:
+        relative = os.path.relpath(resolved, ROOT)
+    except ValueError:  # another Windows drive: outside the repo by definition
+        relative = os.pardir
+    if relative == os.curdir:
+        return None
+    if relative.split(os.sep, 1)[0] == os.pardir:
+        if resolved.exists():
+            return None
+    elif Path(relative).as_posix() in _tracked_paths():
         return None
     try:
         shown = resolved.relative_to(ROOT)
