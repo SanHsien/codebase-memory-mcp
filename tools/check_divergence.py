@@ -113,11 +113,14 @@ def changed_since_base(base_sha: str, repo_dir: Path) -> list[tuple[str, str]]:
 
     `git diff <commit>` (one ref, no second one) compares the base commit against
     the working tree -- index and unstaged changes both -- so an uncommitted edit
-    is caught here too, not only a committed one. Renames are intentionally not
-    requested (`-M`): see the module docstring for why README.en.md could not be
-    discovered that way regardless, and no other renames are expected in this repo.
+    is caught here too, not only a committed one. Rename detection is switched off
+    explicitly (`--no-renames`): porcelain `git diff` enables it by default
+    (`diff.renames`), and a renamed upstream file would then arrive as a single `R`
+    line naming only the new path, so the deleted upstream path would never be
+    checked against the registry. See the module docstring for why README.en.md
+    could not be discovered through rename detection regardless.
     """
-    result = run_git(["diff", "--name-status", base_sha, "--"], repo_dir)
+    result = run_git(["diff", "--no-renames", "--name-status", base_sha, "--"], repo_dir)
     if result.returncode != 0:
         raise DivergenceCheckError(f"git diff failed: {result.stderr.strip()}")
     pairs = []

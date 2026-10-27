@@ -83,6 +83,30 @@ def test_compute_divergent_files_excludes_a_newly_added_file(
     assert "NEW.md" not in divergent
 
 
+def test_a_renamed_upstream_file_still_counts_as_deleted_at_its_old_path(
+    tmp_path: Path,
+) -> None:
+    # Porcelain `git diff` turns rename detection on by default (diff.renames), so a
+    # `git mv` of an upstream file comes back as one `R100 old new` line. Reading only
+    # the status letter and the last path loses the old path entirely: the upstream
+    # file disappears from the fork and the registry check never hears about it.
+    repo = tmp_path / "renamed"
+    repo.mkdir()
+    _run(["init", "--initial-branch=main"], repo)
+    _run(["config", "user.email", "test@example.invalid"], repo)
+    _run(["config", "user.name", "Test"], repo)
+    (repo / "UPSTREAM.md").write_text("upstream content\n" * 20, encoding="utf-8")
+    _run(["add", "."], repo)
+    _run(["commit", "-m", "base"], repo)
+    base_sha = _run(["rev-parse", "HEAD"], repo).strip()
+    _run(["mv", "UPSTREAM.md", "MOVED.md"], repo)
+    _run(["commit", "-m", "move an upstream file"], repo)
+    owned = checker.owned_files_at_base(base_sha, repo)
+    pairs = checker.changed_since_base(base_sha, repo)
+    assert ("D", "UPSTREAM.md") in pairs
+    assert "UPSTREAM.md" in checker.compute_divergent_files(pairs, owned)
+
+
 def test_base_commit_available_distinguishes_real_from_bogus_sha(
     tiny_repo: tuple[Path, str],
 ) -> None:
