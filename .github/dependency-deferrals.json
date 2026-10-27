@@ -1,8 +1,8 @@
 {
   "deferrals": {
     "ruff": {
-      "deferredLatest": "0.17.2",
-      "reason": "The development gate runs ruff only with --select E9,F (tools/dev_check.ps1); that rule set passes on 0.16.10 and 0.17.2, so the declared floor stays at the lowest version tested. Re-evaluate when a newer ruff is released."
+      "deferredLatest": "0.17.3",
+      "reason": "The development gate runs ruff only with --select E9,F (tools/dev_check.ps1); that rule set passes on 0.16.10, 0.17.2 and 0.17.3, so the declared floor stays at the lowest version tested. Re-evaluate when a newer ruff is released."
     }
   },
   "notes": "Record deferred dependency version bumps here when keeping an existing major/minor line is intentional."
