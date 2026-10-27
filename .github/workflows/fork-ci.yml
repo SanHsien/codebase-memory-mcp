@@ -1,13 +1,10 @@
 name: Fork CI
 
 # 維護層 gate（文件、工具、契約）。C 產品本體由上游的 pr.yml / dry-run.yml 驗證。
+# 推送不設路徑過濾：gate 的分岔登記檢查要守的正是 src/、internal/、vendored/ 的上游檔。
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "src/**"
-      - "internal/**"
-      - "vendored/**"
   pull_request:
     branches: [main]
   workflow_dispatch:
