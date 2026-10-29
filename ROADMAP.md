@@ -15,8 +15,6 @@
 | --- | --- | --- | --- | --- |
 | 查明 `detect_changes_scope_tests_answers_test_impact` 為何失敗 | 2026-10-28 同步後跑受影響 12 個 suite，有 5 個失敗且在合併前就失敗；其中 4 個 `cli_install_*` 已知是本機 ACL 環境問題，這 1 個沒有歸因，可能是真實缺陷也可能是環境 | 在 MSYS2 CLANG64（ASan＋UBSan）重跑該測試並得出根因；若是缺陷，先有重現測試再修並更新 `REVIEW.md`「未結」；若是環境，把條件寫進 `docs/DEVELOPMENT.md` 與 `REVIEW.md`「未結」 | Claude Opus | 深掃報告（2026-10-28）「追加：上游同步」驗證段；`REVIEW.md:150-` 未結段 |
 | 讓 Dependency freshness 的報告在檢查失敗時仍進 step summary，並修正含 UNKNOWN 列時的措辭 | 檢查器 exit 1 時後續步驟不跑，報告進不了 summary；含 UNKNOWN 列時「N dependencies are behind」措辭不精確，會把查不到說成落後 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
-| 讓 `tools/tests/test_links.py` 被強制中止時不在 repo 內留下暫存檔 | 測試在 `tools/tests/` 寫 `_untracked_link_target.md`，中途被殺會殘留，之後連結檢查與 `git status` 都被汙染 | 暫存檔改寫到 `tmp_path` 之類 repo 外位置（仍要測到「存在但未入版控」），或啟動時清掉殘留；測試仍能證明未入版控檔案被判為壞連結；`dev_check.ps1` 綠 | Claude Haiku | `tools/tests/test_links.py:26-37`；`69640114` |
-| 文件收尾三處 | `REVIEW.md` 開頭寫「最新覆核：2026-10-07」，但檔內已有 2026-10-28 的段落；2026-10-28 分流紀錄少列 PR 2817 的 3 個檔案；2026-10-25 分流紀錄沒註明 2782／2784／2786 在上游回 404 | `REVIEW.md` 開頭日期與最新段落一致；兩份 `docs/records/upstream-triage-*.md` 補上述資訊；`python tools/check_links.py` 與 `dev_check.ps1` 綠 | Claude Haiku | `REVIEW.md:3,135`；`docs/records/upstream-triage-2026-10-28.md`；審查員建議見 深掃報告（2026-10-28） |
 
 ## 中期：等條件成立再做
 

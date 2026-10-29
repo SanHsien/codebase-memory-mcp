@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -24,12 +27,31 @@ def test_a_link_whose_case_differs_from_the_tracked_file_is_broken() -> None:
     assert checker._missing_relative(AGENTS, "docs/development.md") is not None
 
 
-def test_a_link_to_an_untracked_local_file_is_broken() -> None:
+def test_a_link_to_an_untracked_local_file_is_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # A file that exists only in this checkout (build output, an ignored report) is
     # not on GitHub either.
-    untracked = checker.ROOT / "tools" / "tests" / "_untracked_link_target.md"
+    # Clean up any legacy remnant in the repo if a previous test run was abruptly killed.
+    legacy = checker.ROOT / "tools" / "tests" / "_untracked_link_target.md"
+    if legacy.exists():
+        legacy.unlink()
+
+    # The temporary target is placed outside the repo in tmp_path so abrupt test aborts
+    # never dirty the repository.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    doc = tmp_path / "AGENTS.md"
+    doc.write_text("# Test\n", encoding="utf-8")
+    untracked = tmp_path / "tools" / "tests" / "_untracked_link_target.md"
+    untracked.parent.mkdir(parents=True, exist_ok=True)
     untracked.write_text("local only\n", encoding="utf-8")
+
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    checker._tracked_paths.cache_clear()
     try:
-        assert checker._missing_relative(AGENTS, "tools/tests/_untracked_link_target.md") is not None
+        assert (
+            checker._missing_relative(doc, "tools/tests/_untracked_link_target.md")
+            is not None
+        )
     finally:
-        untracked.unlink()
+        checker._tracked_paths.cache_clear()

@@ -32,7 +32,7 @@
 
 | # | 標題 | 狀態 | 決定 |
 |---:|---|---|---|
-| [2817](https://github.com/DeusData/codebase-memory-mcp/pull/2817) | feat(cli): note when a Claude Code session keeps searching without the graph | OPEN（head `8fd93a2e`） | Claude Code hook 的提示行為，動 `cli.c`、`hook_augment.c`（+407／−17）。尚未合併，不提前移植；合併後隨同步進來。觸發：上游合併或關閉 2817 |
+| [2817](https://github.com/DeusData/codebase-memory-mcp/pull/2817) | feat(cli): note when a Claude Code session keeps searching without the graph | OPEN（head `8fd93a2e`） | Claude Code hook 的提示行為，動 `cli.c`、`hook_augment.c`、`tests/test_cli.c`、`scripts/smoke-test.sh`、`README.md`（+407／−17）。尚未合併，不提前移植；合併後隨同步進來。觸發：上游合併或關閉 2817 |
 
 ## Issue
 

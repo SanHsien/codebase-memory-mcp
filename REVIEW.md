@@ -1,6 +1,6 @@
 # REVIEW
 
-最新覆核：2026-10-07。範圍：產品 C 程式碼（`src/`、`internal/cbm/` 非 vendored）、安裝腳本、workflow、測試腳本。
+最新覆核：2026-10-28。範圍：產品 C 程式碼（`src/`、`internal/cbm/` 非 vendored）、安裝腳本、workflow、測試腳本。
 
 ## 方法與環境
 
