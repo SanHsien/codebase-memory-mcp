@@ -14,7 +14,7 @@
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
 | 查明 `detect_changes_scope_tests_answers_test_impact` 為何失敗 | 2026-10-28 同步後跑受影響 12 個 suite，有 5 個失敗且在合併前就失敗；其中 4 個 `cli_install_*` 已知是本機 ACL 環境問題，這 1 個沒有歸因，可能是真實缺陷也可能是環境 | 在 MSYS2 CLANG64（ASan＋UBSan）重跑該測試並得出根因；若是缺陷，先有重現測試再修並更新 `REVIEW.md`「未結」；若是環境，把條件寫進 `docs/DEVELOPMENT.md` 與 `REVIEW.md`「未結」 | Claude Opus | 深掃報告（2026-10-28）「追加：上游同步」驗證段；`REVIEW.md:150-` 未結段 |
-| 讓 Dependency freshness 的報告在檢查失敗時仍進 step summary，並修正含 UNKNOWN 列時的措辭 | 檢查器 exit 1 時後續步驟不跑，報告進不了 summary；含 UNKNOWN 列時「N dependencies are behind」措辭不精確，會把查不到說成落後 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
+| 手動觸發 `dependency-freshness.yml`，確認 step summary 在全新鮮與有落後兩種情況都有報告 | 報告寫入與措辭修正已進 main（2026-10-30）；剩實機 workflow 驗證，推送前做不到 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
 
 ## 中期：等條件成立再做
 

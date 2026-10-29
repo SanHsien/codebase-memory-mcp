@@ -180,7 +180,8 @@ def render_markdown(rows: list[dict]) -> str:
         "| Package | File | Declared | Latest PyPI | Status |",
         "|---|---|---|---|---|",
     ]
-    attention_count = 0
+    outdated_count = 0
+    unknown_count = 0
     for row in rows:
         name = row["name"]
         file = row["file"]
@@ -188,10 +189,10 @@ def render_markdown(rows: list[dict]) -> str:
         latest = row["latest"]
         if row.get("lookup_failed"):
             status = "**UNKNOWN** (PyPI lookup failed)"
-            attention_count += 1
+            unknown_count += 1
         elif needs_review(row):
             status = "**OUTDATED**"
-            attention_count += 1
+            outdated_count += 1
         elif row["hold"]:
             status = f"HELD: {row['hold']}"
         elif row["deferral"]:
@@ -202,8 +203,16 @@ def render_markdown(rows: list[dict]) -> str:
             status = "fresh"
         lines.append(f"| `{name}` | `{file}` | `{declared}` | `{latest}` | {status} |")
     lines.append("")
-    if attention_count > 0:
-        lines.append(f"**Attention needed**: {attention_count} dependencies are behind and require review.\n")
+    attention_parts = []
+    if outdated_count > 0:
+        noun = "dependency is" if outdated_count == 1 else "dependencies are"
+        attention_parts.append(f"{outdated_count} {noun} behind")
+    if unknown_count > 0:
+        noun = "dependency" if unknown_count == 1 else "dependencies"
+        attention_parts.append(f"{unknown_count} {noun} could not be checked")
+
+    if attention_parts:
+        lines.append(f"**Attention needed**: {'; '.join(attention_parts)}; review required.\n")
     else:
         lines.append("All declared dependencies are fresh, held, or deferred.\n")
     return "\n".join(lines)
@@ -228,6 +237,8 @@ def main() -> int:
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
             fh.write(f"needs_attention={'true' if has_attention else 'false'}\n")
 
+    if args.github_output:
+        return 0
     return 1 if has_attention else 0
 
 

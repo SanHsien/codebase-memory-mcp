@@ -72,3 +72,75 @@ def test_a_failed_pypi_lookup_is_not_reported_as_fresh(
     report = checker.render_markdown(rows)
     assert "| fresh |" not in report
     assert "UNKNOWN" in report
+
+
+def test_report_with_unknown_rows_does_not_claim_dependencies_are_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A lookup failure means PyPI was not reached or returned 404; it should not be reported
+    # as being behind, which implies a newer release was observed.
+    monkeypatch.setattr(checker, "fetch_pypi_version", lambda name: None)
+    packages = checker.parse_requirements("ruff>=0.16\n", "requirements-dev.txt")
+    rows = checker.collect_status(packages, deferrals={})
+    report = checker.render_markdown(rows)
+    assert "behind" not in report
+    assert "could not be checked" in report
+    assert "**Attention needed**" in report
+
+
+def test_report_distinguishes_outdated_and_unknown_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_fetch(name: str) -> str | None:
+        if name == "ruff":
+            return "0.99.0"  # outdated
+        return None  # unknown
+
+    monkeypatch.setattr(checker, "fetch_pypi_version", fake_fetch)
+    packages = checker.parse_requirements("ruff>=0.16\npytest>=8.0\n", "requirements-dev.txt")
+    rows = checker.collect_status(packages, deferrals={})
+    report = checker.render_markdown(rows)
+    assert "1 dependency is behind" in report
+    assert "1 dependency could not be checked" in report
+
+
+def test_github_output_mode_exits_zero_even_when_attention_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(checker, "fetch_pypi_version", lambda name: "99.0.0")
+    report_file = tmp_path / "report.md"
+    gh_output = tmp_path / "gh_output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_dependency_freshness.py",
+            "--output",
+            str(report_file),
+            "--github-output",
+        ],
+    )
+    exit_code = checker.main()
+    assert exit_code == 0
+    assert "needs_attention=true" in gh_output.read_text(encoding="utf-8")
+
+
+def test_cli_mode_exits_one_when_attention_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(checker, "fetch_pypi_version", lambda name: "99.0.0")
+    report_file = tmp_path / "report.md"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_dependency_freshness.py",
+            "--output",
+            str(report_file),
+        ],
+    )
+    exit_code = checker.main()
+    assert exit_code == 1
