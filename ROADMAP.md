@@ -17,7 +17,6 @@
 | 讓 Dependency freshness 的報告在檢查失敗時仍進 step summary，並修正含 UNKNOWN 列時的措辭 | 檢查器 exit 1 時後續步驟不跑，報告進不了 summary；含 UNKNOWN 列時「N dependencies are behind」措辭不精確，會把查不到說成落後 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
 | 讓 `tools/tests/test_links.py` 被強制中止時不在 repo 內留下暫存檔 | 測試在 `tools/tests/` 寫 `_untracked_link_target.md`，中途被殺會殘留，之後連結檢查與 `git status` 都被汙染 | 暫存檔改寫到 `tmp_path` 之類 repo 外位置（仍要測到「存在但未入版控」），或啟動時清掉殘留；測試仍能證明未入版控檔案被判為壞連結；`dev_check.ps1` 綠 | Claude Haiku | `tools/tests/test_links.py:26-37`；`69640114` |
 | 文件收尾三處 | `REVIEW.md` 開頭寫「最新覆核：2026-10-07」，但檔內已有 2026-10-28 的段落；2026-10-28 分流紀錄少列 PR 2817 的 3 個檔案；2026-10-25 分流紀錄沒註明 2782／2784／2786 在上游回 404 | `REVIEW.md` 開頭日期與最新段落一致；兩份 `docs/records/upstream-triage-*.md` 補上述資訊；`python tools/check_links.py` 與 `dev_check.ps1` 綠 | Claude Haiku | `REVIEW.md:3,135`；`docs/records/upstream-triage-2026-10-28.md`；審查員建議見 深掃報告（2026-10-28） |
-| 確認沒人使用後，移除殘留的 detached worktree 與已併入／已關閉的本機舊分支 | 本機 clone 有殘留的 detached worktree 與舊分支，內容皆已在 `main` 或對應 PR 已關閉；刪除屬破壞性操作，需維護者明確同意 | 先跑 `git worktree list` 與 `git branch -vv` 查現況；刪後 `git worktree list` 只剩主工作樹、`git branch` 只剩 `main`；遠端本來就只有 `main` | 維護者 | 接續開發報告（2026-10-2x）「找到的未完成線索」「需要維護者決定」 |
 
 ## 中期：等條件成立再做
 
