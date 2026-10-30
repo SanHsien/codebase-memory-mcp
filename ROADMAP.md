@@ -13,13 +13,13 @@
 
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
-| 查明 `detect_changes_scope_tests_answers_test_impact` 為何失敗 | 2026-10-28 同步後跑受影響 12 個 suite，有 5 個失敗且在合併前就失敗；其中 4 個 `cli_install_*` 已知是本機 ACL 環境問題，這 1 個沒有歸因，可能是真實缺陷也可能是環境 | 在 MSYS2 CLANG64（ASan＋UBSan）重跑該測試並得出根因；若是缺陷，先有重現測試再修並更新 `REVIEW.md`「未結」；若是環境，把條件寫進 `docs/DEVELOPMENT.md` 與 `REVIEW.md`「未結」 | Claude Opus | 深掃報告（2026-10-28）「追加：上游同步」驗證段；`REVIEW.md:150-` 未結段 |
 | 手動觸發 `dependency-freshness.yml`，確認 step summary 在全新鮮與有落後兩種情況都有報告 | 報告寫入與措辭修正已進 main（2026-10-30）；剩實機 workflow 驗證，推送前做不到 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
 
 ## 中期：等條件成立再做
 
 | 項目 | 觸發條件 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
+| 決定是否讓 test impact 支援 MSYS mount 路徑 | 維護者決定處理，或上游改動 `gf_native_metadata_path` | 先有 `/home` 類路徑的重現測試再修；登記分岔；無映射時仍 fail-closed | Claude Opus | `REVIEW.md`「未結」；`src/mcp/test_impact_git.c:718-746` |
 | 同步上游新 commit 並分流新 PR／issue | `Upstream check` workflow（週一 03:00 UTC）轉 failure，或上游 PR 2809／2817 合併；failure 代表有未審項目，不是工具壞 | 照 `docs/UPSTREAM.md` 步驟：三方合併前掃描隱藏內容（長空白、超長行、`eval`、base64、零寬／雙向字元）；分流寫進新的 `docs/records/upstream-triage-<日期>.md`；動到 C 時先有失敗測試，並在 MSYS2 CLANG64 跑受影響 suite（含 `test_stack_overflow`、`test_watcher`）；`dev_check.ps1` 綠、`check_upstream_updates.py --strict` exit 0、水位推進；提交訊息不寫 `#編號`、需 DCO 簽署 | Claude Sonnet | `docs/UPSTREAM.md`；`docs/DECISIONS.md:12,14`；`docs/records/upstream-triage-2026-10-28.md` 末段觸發條件 |
 | 鏡像上游新 release 並替換舊 tag／release | 上游發出比 v0.12.1 更新的 release | release 資產鏡像自上游且雜湊核對相符；tag 指向本 fork 同步到該版本的提交；舊 tag 與 release 移除，遠端 tag 只剩最新一個 | Claude Sonnet（刪遠端 tag 前維護者確認） | `docs/DECISIONS.md:4`；`gh release list -R DeusData/codebase-memory-mcp -L 3` 查詢（上游最近 release） |
 | ruff 延後紀錄重新評估 | PyPI 出現比 0.17.3 更新的 ruff，`Dependency freshness` 轉紅 | 用新版跑 gate 規則（`--select E9,F`）通過後更新 `.github/dependency-deferrals.json` 的 `deferredLatest` 與理由，下限不變；`Dependency freshness` success | Claude Haiku | `ddabaffc`；`REVIEW.md:135-` 2026-10-28 段 |

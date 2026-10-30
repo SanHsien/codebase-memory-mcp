@@ -41,6 +41,7 @@ make -f Makefile.cbm lint-format lint-no-suppress      # 格式與 NOLINT 檢查
 - `cli_install_*` 測試會拒絕繼承了「Authenticated Users 可修改」的執行檔目錄。`build\c` 由 MSYS 建立時擁有者不同，`-ProtectDir` 改不了它的權限：改用 PowerShell 自建一個資料夾、以 `-ProtectDir` 保護，把 `test-runner.exe` 複製進去再執行。
 - 完整的 `scripts/test.sh` 契約步驟 0r 起需要建立符號連結的權限（開啟 Windows 開發人員模式或以系統管理員執行）。
 - `AppData\Local` 帶有額外 ACL 主體（如 AppContainer、沙箱群組）時，daemon 的祖先目錄安全檢查會拒絕，測試在啟動時就失敗（`failed to create isolated test cache and daemon runtime`）或 4 個 `daemon_ipc` 測試失敗。把 `LOCALAPPDATA` 指到使用者目錄下自建的空資料夾即可，例如 `export LOCALAPPDATA='C:\Users\<you>\cbm-la'`。
+- 在 MSYS2 shell 跑 `mcp` suite 時，`detect_changes_scope_tests_answers_test_impact` 會失敗（`decision` 是 `run_all`、理由 `GIT_UNAVAILABLE`），原因是測試 fixture 的暫存 repo 建在 `cbm_tmpdir()`：它只讀 `TEMP`／`TMP`，而 MSYS2 的 `/etc/profile` 把兩者設為 `/tmp`，所以暫存 repo 落在 MSYS 的 `/tmp`，MSYS git 回報的 `/tmp/...` 無法對應成原生路徑，`src/mcp/test_impact_git.c` 的 `gf_native_metadata_path` 只轉換 `/c/...` 形式，其餘拒絕為「Git metadata path is not absolute」。把 `TMP`、`TEMP`、`TMPDIR` 與 `CBM_CI_TEMP_ROOT` 指到使用者目錄下的受保護暫存根（上一條的 `new-protected-temp-root.ps1`，輸出 Windows 形式的路徑）即通過。注意 `MSYSTEM=CLANG64` 要在叫起 `bash.exe -l` 之前就設好，否則找不到 clang64 的執行階段 DLL。
 
 不要啟用 `core.hooksPath scripts/hooks`（pre-commit 會跑完整 lint、建置與測試）。
 

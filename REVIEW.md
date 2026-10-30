@@ -149,6 +149,7 @@
 
 ## 未結
 
+- **`detect_changes_scope_tests_answers_test_impact`**（2026-10-30 查明，測試由 MSYS 環境觸發，背後是上游產品的已知限制；未動產品邏輯）：fixture 的暫存 repo 建在 `cbm_tmpdir()`，MSYS2 profile 預設 `TMP`／`TEMP=/tmp`，MSYS git 回 `/tmp/...`，`gf_native_metadata_path` 只映射 `/c/...` 形式而拒絕其餘，測試得到 `run_all`＋`GIT_UNAVAILABLE`（診斷「Git metadata path is not absolute」）。同機同 binary，暫存根設為使用者目錄下受保護路徑後 `mcp` suite 373 passed、0 failed；不設則 372 passed、1 failed，可重現。條件寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。使用者以 MSYS git 分析 MSYS 根目錄下的 repo（`/home`、`/tmp` 等）同樣得到 `run_all`＋`GIT_UNAVAILABLE`；這是 fail-closed，不會給假的無影響結論。是否改用 mount 轉換由維護者決定（上游行為，動它要登記分岔），見 ROADMAP 中期。
 - **`daemon_ipc` 測試**在 `AppData\Local` 帶有額外 ACL 主體（AppContainer、`CodexSandboxUsers`）的機器上失敗：daemon 的祖先目錄安全檢查拒絕。屬環境問題，未動安全邏輯；解法寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 - C++ `std::vector<` 8000 層這類輸入仍要約 49 秒，其中 46 秒在 vendored 的 tree-sitter C++ 解析器本身（不在本 fork 修改範圍）。
 - `py_lsp_scale` 的比例檢查（2000/100 < 200 倍）在 24 個平行工作下會失敗，單獨重跑通過（75.6 倍）。同負載下各跑 12 份對照：修正後 2000 個函式約 19.4 秒，未修改的版本約 31.6 秒，比例相近，屬上游既有的負載敏感測試（上游註解：已知超線性，#1527）。
