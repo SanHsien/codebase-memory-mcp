@@ -11,9 +11,7 @@
 
 ## 近期：可以直接動手
 
-| 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
-| --- | --- | --- | --- | --- |
-| 手動觸發 `dependency-freshness.yml`，確認 step summary 在全新鮮與有落後兩種情況都有報告 | 報告寫入與措辭修正已進 main（2026-10-30）；剩實機 workflow 驗證，推送前做不到 | 用 `tools/tests/test_dependency_freshness.py` 新增測試：含 UNKNOWN 列的報告不寫成 behind；手動觸發 `dependency-freshness.yml`，兩種情況（全新鮮、有落後）summary 都有報告；`pwsh -NoProfile -File tools\dev_check.ps1` 綠 | Claude Sonnet | `.github/workflows/dependency-freshness.yml:55-84`；`tools/check_dependency_freshness.py:206`；`f348e023` |
+目前沒有可直接動手的項目。
 
 ## 中期：等條件成立再做
 
