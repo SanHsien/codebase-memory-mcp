@@ -144,3 +144,63 @@ def test_cli_mode_exits_one_when_attention_needed(
     )
     exit_code = checker.main()
     assert exit_code == 1
+
+
+def _run_main_and_read_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    requirements: str,
+    fetch,
+) -> str:
+    # The workflow appends the file written by main() to $GITHUB_STEP_SUMMARY, so this
+    # is the text a reader of the summary sees. Declared deps and deferrals are pinned
+    # so the test never depends on the repo's real requirements or on the network.
+    packages = checker.parse_requirements(requirements, "requirements-dev.txt")
+    monkeypatch.setattr(checker, "load_declared_requirements", lambda *a, **k: packages)
+    monkeypatch.setattr(checker, "load_deferrals", lambda *a, **k: {})
+    monkeypatch.setattr(checker, "fetch_pypi_version", fetch)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    report_file = tmp_path / "report.md"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check_dependency_freshness.py", "--output", str(report_file), "--github-output"],
+    )
+    assert checker.main() == 0
+    return report_file.read_text(encoding="utf-8")
+
+
+def test_step_summary_report_for_all_fresh_deps_has_no_attention_banner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    report = _run_main_and_read_report(
+        monkeypatch, tmp_path, "ruff>=0.16\n", lambda name: "0.16.0"
+    )
+    assert "All declared dependencies are fresh, held, or deferred." in report
+    assert "Attention needed" not in report
+    assert "behind" not in report
+
+
+def test_step_summary_report_for_behind_deps_counts_them_as_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    report = _run_main_and_read_report(
+        monkeypatch, tmp_path, "ruff>=0.16\npytest>=8.0\n", lambda name: "99.0.0"
+    )
+    assert "2 dependencies are behind" in report
+    assert "could not be checked" not in report
+    assert "All declared dependencies are fresh" not in report
+
+
+def test_step_summary_report_with_only_unknown_rows_is_not_written_as_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    report = _run_main_and_read_report(
+        monkeypatch, tmp_path, "ruff>=0.16\npytest>=8.0\n", lambda name: None
+    )
+    assert "behind" not in report
+    assert "2 dependencies could not be checked" in report
+    assert "All declared dependencies are fresh" not in report
