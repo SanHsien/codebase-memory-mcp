@@ -7,7 +7,7 @@
 
 `codebase-memory-mcp` 是 `DeusData/codebase-memory-mcp` 的維護 fork：本機程式碼知識圖譜 MCP 伺服器，產品本體以上游為準，本 fork 只加維護層（Windows 維護 gate、上游追蹤與分岔登記、繁中 README；`FORK.md:1-8`）。最近 release 是 v0.12.1（2026-10-23，鏡像自上游 v0.12.1）。
 健康：open PR 0、Dependabot 與 code scanning 告警 0，`main` 上 CodeQL SAST、DCO、Fork CI、Dependency freshness、Upstream check、test-impact-artifact 最近一次皆 success；issues 在 GitHub 上已停用，open issue 數是「未查到」，不是 0（2026-10-29 `gh` 查詢）。
-上游審查水位在 commit `e0c7a1da`、PR 2906、issue 2908（2026-11-04 整批三方合併，見 `docs/records/upstream-triage-2026-11-04.md`）（`tools/upstream_baseline.json`）；與上游「No common ancestor」是已知事實，同步用三方合併而非 `git merge` 上游歷史。上游 `main` 在 2026-11-04 的 head 是 `e0c7a1da`，之後是否出現未審項目「未查到」，以 `python tools/check_upstream_updates.py --strict` 為準。
+上游審查水位在 commit `e0c7a1da`、PR 2909、issue 2908（2026-11-04 整批三方合併，見 `docs/records/upstream-triage-2026-11-04.md`）（`tools/upstream_baseline.json`）；與上游「No common ancestor」是已知事實，同步用三方合併而非 `git merge` 上游歷史。上游 `main` 在 2026-11-04 的 head 是 `e0c7a1da`，之後是否出現未審項目「未查到」，以 `python tools/check_upstream_updates.py --strict` 為準。
 
 ## 近期：可以直接動手
 
