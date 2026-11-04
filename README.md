@@ -27,6 +27,8 @@ notepad install.ps1   # 先看過腳本再執行
 .\install.ps1
 ```
 
+上游 repo 也是 Claude Code 外掛市集：`claude plugin marketplace add DeusData/codebase-memory-mcp` 後 `claude plugin install codebase-memory@codebase-memory`，只註冊 MCP 伺服器（skill、agent 與 hook 仍要用 `install`）；兩種擇一，同時用會跑兩份伺服器。Windows 已知問題與繞法見 [`docs/WINDOWS_TROUBLESHOOTING.md`](docs/WINDOWS_TROUBLESHOOTING.md)。
+
 ## 開發環境（本 fork）
 
 主要環境是 **Windows 11 + PowerShell**。維護 gate 不需要 C 工具鏈；建置與測試 C 程式用 MSYS2 CLANG64（上游 CI 也是）。
