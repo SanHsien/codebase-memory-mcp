@@ -20,7 +20,7 @@
 
 | PR | 內容 | 決定與驗證 |
 |---:|---|---|
-| 1862 | `install --no-hooks`／`--hooks` 並持久化（`install_hooks` 設定） | 採用；預設仍是啟用 hook。`--no-hooks`／`--hooks` 在本機 Windows 未驗證：其新測試被 ACL 環境問題擋住（見驗證段） |
+| 1862 | `install --no-hooks`／`--hooks` 並持久化（`install_hooks` 設定） | 採用；預設仍是啟用 hook。`--no-hooks`／`--hooks` 已在本機 Windows 驗證：測試執行檔放進受保護資料夾後 `cli` suite 370 passed、0 failed（見驗證段末） |
 | 2205 | `daemon start` 不再重新啟用被停用的 UI（`cbm_ui_config_daemon_start_ui`） | 採用；`ui` suite 帶測試 |
 | 2667 | Java：已證明為外部型別的接收者不做名稱猜測 | 採用；新增 `java_typed_calls` suite（`Makefile.cbm` 一處登記，`tests/test_main.c` 兩行） |
 | 2749 | POSIX 無範圍搜尋改用 argv 階段（不經 shell） | 採用；僅 `#ifndef _WIN32`，Windows 不受影響，也無法在本機重現 |
@@ -77,6 +77,7 @@ Windows 相關項目逐筆讀過 diff：`0e8fc16a`（Windows 上略過 Gemini co
 - 綠：合併後重建，跑 `cli,mcp,watcher,pipeline,extraction,ui,parallel,agent_clients,edge_types_probe,java_typed_calls`：2149 passed、10 failed、35 skipped。上列 7 項紅燈全數轉綠，`java_typed_calls`、`watcher`、`agent_clients`、`parallel`、`pipeline`、`extraction`、`edge_types_probe` 無失敗。
 - 剩下 10 個失敗都在環境類，未歸因到合併內容：`cli` 6 個（`cli_install_*` 回 `acl-grants-cross-account-mutation`，即 `DEVELOPMENT.md` 記載的 `build\c` 目錄權限問題）、`mcp` 1 個（`test_mcp.c:20171`，`detect_changes` 測試 impact 決定為 `run_all`，即 `DEVELOPMENT.md` 記載的 MSYS `/tmp` 問題）、`ui` 3 個（`atlas_history_*`、`atlas_selection_impact_git_*`，是 git 子行程的測試 fixture，與本輪動到的 `config.c`、`layout3d.c` 無關）。依文件改用受保護資料夾重跑 `cli mcp ui`，在暫存目錄的環境下失敗更多（62 個），沒有得到乾淨的結果；這 10 個**沒有**在合併前的樹上對照過，所以只能說「沒有證據指向合併」，不是「已證明與合併無關」。完整全部 suite 本輪沒跑（11-04 跑過 10236 passed）。
 - 事後對照（審查者在合併前後的樹上各跑 cli、mcp、ui）：失敗數 5 → 7；多出的 2 項是 PR 1862 的新測試 `cli_no_hooks_removes_codex_pretool_hook`、`cli_no_hooks_removes_augment_owned_scripts`，同為 `acl-grants-cross-account-mutation` 環境問題；既有測試無回歸；上面 ui 的 3 項（atlas_*）是前次執行環境特有，乾淨環境兩次都通過。上一點「沒有對照過」以本點為準。
+- 補驗（2026-11-10，ACL 環境問題的正規解法）：`cli_install_*` 拒絕的是測試執行檔所在目錄的繼承 ACL（`build\c` 繼承了 `Authenticated Users` 可修改）。`scripts/ci/new-protected-temp-root.ps1 -Prefix <名稱>-` 用 `powershell.exe` 建立只有目前使用者的受保護暫存根，在其下建 `bin` 子資料夾、把 `build/c/test-runner.exe` 複製進去，`TMP`、`TEMP`、`TMPDIR`、`CBM_CI_TEMP_ROOT` 指到該暫存根、`LOCALAPPDATA` 指到使用者可控的空資料夾，從 `bin` 內的複本執行 `test-runner.exe cli`。對照：同樹在 `build\c` 直接跑 `scripts/test.sh --suites cli CC=clang CXX=clang++` 為 364 passed、6 failed、11 skipped（失敗行 `test_cli.c:2385`、`2451`、`2886`、`3011`、`3074`、`3393`，即 `cli_install_force_quiesces_active_cohort_before_replacing_binary`、`cli_install_dir_and_skip_config_stage_first_install_safely`、`cli_no_hooks_removes_codex_pretool_hook`、`cli_no_hooks_removes_augment_owned_scripts`、`cli_install_reset_deletion_waits_for_final_activation_guard`、`cli_install_config_failure_keeps_published_binary`）；改從受保護資料夾執行為 370 passed、0 failed、11 skipped、exit 0，這 6 項全部通過，包含 PR 1862 的 `cli_no_hooks_removes_codex_pretool_hook` 與 `cli_no_hooks_removes_augment_owned_scripts`。結論：這 6 項失敗純屬執行環境，與合併內容無關；上方「未歸因」「沒有對照」兩點以此為準。
 - `tools/dev_check.ps1`：exit 0（compileall、ruff、pytest、連結、分岔登記：87 個上游檔案分岔、87 個已登記）；`python tools/check_upstream_updates.py --strict`：exit 0；`git diff --check` 無輸出。
 - 測試中沒有寫死會隨日期失效的值（新增測試以相對時間或固定的假時鐘 `cbm_watcher_test_set_clock_ns` 取值）。
 
