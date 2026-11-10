@@ -379,13 +379,8 @@ static int semantic_manifest_walk_controls(semantic_manifest_builder_t *builder,
                                            const char *rel_dir, int depth, char **excluded_dirs,
                                            int excluded_count);
 
-static int semantic_manifest_control_entry(semantic_manifest_builder_t *builder,
-                                           const char *project, const char *abs_dir,
-                                           const char *rel_dir, int depth, char **excluded_dirs,
-                                           int excluded_count, const cbm_dirent_t *entry) {
-    const char *name = entry->name;
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-        return 0;
+/* Control files are the only regular files the walk records. */
+static bool semantic_manifest_control_name(const char *rel_dir, const char *name) {
     bool root_control = (!rel_dir || !rel_dir[0]) && (strcmp(name, ".cbmignore") == 0 ||
                                                       strcmp(name, ".codebase-memory.json") == 0);
     /* A build context's ignore file (or BuildKit's <Dockerfile>.dockerignore)
@@ -395,21 +390,27 @@ static int semantic_manifest_control_entry(semantic_manifest_builder_t *builder,
     size_t nl = strlen(name);
     bool dockerignore = nl >= sizeof(DOCKERIGNORE) - SKIP_ONE &&
                         strcmp(name + nl - (sizeof(DOCKERIGNORE) - SKIP_ONE), DOCKERIGNORE) == 0;
-    bool control = strcmp(name, ".gitignore") == 0 || root_control ||
-                   semantic_manifest_package_control(name) || dockerignore;
-    /* Only directories and control files need inspecting. Skipping the rest
-     * by the listing's own type keeps an entry that cannot be inspected from
-     * failing the whole manifest: on Windows `<dir>\nul` (a file Git Bash
-     * creates from `cmd > nul`) opens the NUL device, so every index run of
-     * the repository aborted (upstream #2646). The Windows listing always
-     * knows whether an entry is a directory; POSIX may not (d_type 0 is
-     * DT_UNKNOWN), and then the entry is inspected as before. */
+    return strcmp(name, ".gitignore") == 0 || root_control ||
+           semantic_manifest_package_control(name) || dockerignore;
+}
+
+/* True when the directory listing alone shows that the entry is not a
+ * directory. A Windows listing always carries the attributes; on POSIX a
+ * d_type of DT_UNKNOWN (0), which readdir could not resolve, proves nothing. */
+static bool semantic_manifest_listed_non_directory(const cbm_dirent_t *entry) {
 #ifdef _WIN32
-    bool type_known = true;
+    return !entry->is_dir;
 #else
-    bool type_known = entry->d_type != 0;
+    return entry->d_type != 0 && !entry->is_dir;
 #endif
-    if (!control && !entry->is_dir && type_known)
+}
+
+static int semantic_manifest_control_entry(semantic_manifest_builder_t *builder,
+                                           const char *project, const char *abs_dir,
+                                           const char *rel_dir, int depth, char **excluded_dirs,
+                                           int excluded_count, const cbm_dirent_t *entry) {
+    const char *name = entry->name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
         return 0;
     char abs_path[CBM_SZ_4K], rel_path[CBM_SZ_4K];
     int abs_n = snprintf(abs_path, sizeof(abs_path), "%s/%s", abs_dir, name);
@@ -418,6 +419,15 @@ static int semantic_manifest_control_entry(semantic_manifest_builder_t *builder,
     if (abs_n < 0 || (size_t)abs_n >= sizeof(abs_path) || rel_n < 0 ||
         (size_t)rel_n >= sizeof(rel_path))
         return CBM_NOT_FOUND;
+    /* Only directories and control files contribute, so an entry the listing
+     * already shows to be neither is skipped without reading its metadata.
+     * That read can fail on such an entry: on Windows the plain path of a file
+     * named nul names the NUL device (#2646), and the plain path of a name
+     * ending in a dot or a space does not reach the file. */
+    bool control = semantic_manifest_control_name(rel_dir, name);
+    if (!control && semantic_manifest_listed_non_directory(entry)) {
+        return 0;
+    }
     cbm_path_info_t info;
     if (cbm_path_info_utf8(abs_path, &info) != 0)
         return CBM_NOT_FOUND;

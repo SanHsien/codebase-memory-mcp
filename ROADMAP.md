@@ -7,7 +7,7 @@
 
 `codebase-memory-mcp` 是 `DeusData/codebase-memory-mcp` 的維護 fork：本機程式碼知識圖譜 MCP 伺服器，產品本體以上游為準，本 fork 只加維護層（Windows 維護 gate、上游追蹤與分岔登記、繁中 README；`FORK.md:1-8`）。最近 release 是 v0.12.1（2026-10-23，鏡像自上游 v0.12.1）。
 健康：open PR 0、Dependabot 與 code scanning 告警 0，`main` 上 CodeQL SAST、DCO、Fork CI、Dependency freshness、Upstream check、test-impact-artifact 最近一次皆 success；issues 在 GitHub 上已停用，open issue 數是「未查到」，不是 0（2026-10-29 `gh` 查詢）。
-上游審查水位在 commit `e0c7a1da`、PR 2909、issue 2908（2026-11-04 整批三方合併，見 `docs/records/upstream-triage-2026-11-04.md`）（`tools/upstream_baseline.json`）；與上游「No common ancestor」是已知事實，同步用三方合併而非 `git merge` 上游歷史。上游 `main` 在 2026-11-04 的 head 是 `e0c7a1da`，之後是否出現未審項目「未查到」，以 `python tools/check_upstream_updates.py --strict` 為準。
+上游審查水位在 commit `edfb824f`、PR 2943、issue 2941（2026-11-10 增量三方合併，見 `docs/records/upstream-triage-2026-11-10.md`）（`tools/upstream_baseline.json`）；與上游「No common ancestor」是已知事實，同步用三方合併而非 `git merge` 上游歷史。上游 `main` 在 2026-11-10 的 head 是 `edfb824f`，之後是否出現未審項目「未查到」，以 `python tools/check_upstream_updates.py --strict` 為準。
 
 ## 近期：可以直接動手
 
@@ -18,7 +18,7 @@
 | 項目 | 觸發條件 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
 | 決定是否讓 test impact 支援 MSYS mount 路徑 | 維護者決定處理，或上游改動 `gf_native_metadata_path` | 先有 `/home` 類路徑的重現測試再修；登記分岔；無映射時仍 fail-closed | Claude Opus | `REVIEW.md`「未結」；`src/mcp/test_impact_git.c:718-746` |
-| 同步上游新 commit 並分流新 PR／issue | `Upstream check` workflow（週一 03:00 UTC）轉 failure，或上游 PR 2809／2817 合併；failure 代表有未審項目，不是工具壞 | 照 `docs/UPSTREAM.md` 步驟：三方合併前掃描隱藏內容（長空白、超長行、`eval`、base64、零寬／雙向字元）；分流寫進新的 `docs/records/upstream-triage-<日期>.md`；動到 C 時先有失敗測試，並在 MSYS2 CLANG64 跑受影響 suite（含 `test_stack_overflow`、`test_watcher`）；`dev_check.ps1` 綠、`check_upstream_updates.py --strict` exit 0、水位推進；提交訊息不寫 `#編號`、需 DCO 簽署 | Claude Sonnet | `docs/UPSTREAM.md`；`docs/DECISIONS.md:12,14`；`docs/records/upstream-triage-2026-10-28.md` 末段觸發條件 |
+| 同步上游新 commit 並分流新 PR／issue | `Upstream check` workflow（週一 03:00 UTC）轉 failure，或上游 PR 2809、2909、2914、2915 合併；failure 代表有未審項目，不是工具壞 | 照 `docs/UPSTREAM.md` 步驟：三方合併前掃描隱藏內容（長空白、超長行、`eval`、base64、零寬／雙向字元）；分流寫進新的 `docs/records/upstream-triage-<日期>.md`；動到 C 時先有失敗測試，並在 MSYS2 CLANG64 跑受影響 suite（含 `test_stack_overflow`、`test_watcher`）；`dev_check.ps1` 綠、`check_upstream_updates.py --strict` exit 0、水位推進；提交訊息不寫 `#編號`、需 DCO 簽署 | Claude Sonnet | `docs/UPSTREAM.md`；`docs/DECISIONS.md:12,14`；`docs/records/upstream-triage-2026-11-10.md` 末段觸發條件 |
 | 鏡像上游新 release 並替換舊 tag／release | 上游發出比 v0.12.1 更新的 release | release 資產鏡像自上游且雜湊核對相符；tag 指向本 fork 同步到該版本的提交；舊 tag 與 release 移除，遠端 tag 只剩最新一個 | Claude Sonnet（刪遠端 tag 前維護者確認） | `docs/DECISIONS.md:4`；`gh release list -R DeusData/codebase-memory-mcp -L 3` 查詢（上游最近 release） |
 | ruff 延後紀錄重新評估 | PyPI 出現比 0.17.3 更新的 ruff，`Dependency freshness` 轉紅 | 用新版跑 gate 規則（`--select E9,F`）通過後更新 `.github/dependency-deferrals.json` 的 `deferredLatest` 與理由，下限不變；`Dependency freshness` success | Claude Haiku | `ddabaffc`；`REVIEW.md:135-` 2026-10-28 段 |
 | 在本機驗證 graph-ui 的測試 | 需要在本機改動並驗證 `graph-ui/` | 改用 CI 使用的 Node 版本跑 vitest，結果與 CI 一致；本機 Node 26 目前 22 個檔失敗，修改前基準同樣失敗，與 dompurify 無關 | Claude Sonnet | 接續開發報告（2026-10-2x）「刻意不做／延後」第三條 |

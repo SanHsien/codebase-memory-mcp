@@ -4,7 +4,7 @@
 
 > 本 repo fork 自 [`DeusData/codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp)（MIT）。
 > 產品本體以上游為準；本 fork 只加維護骨架與繁體中文入口。差異與同步規則見 [`FORK.md`](FORK.md)、[`docs/DIVERGENCE.md`](docs/DIVERGENCE.md)。
-> 上游完整英文說明（安裝、45 種 client 設定、17 個 MCP 工具、圖資料模型）保留在 [`README.en.md`](README.en.md)。
+> 上游完整英文說明（安裝、46 種 client 設定、17 個 MCP 工具、圖資料模型）保留在 [`README.en.md`](README.en.md)。
 
 ## 這是什麼
 
@@ -27,7 +27,7 @@ notepad install.ps1   # 先看過腳本再執行
 .\install.ps1
 ```
 
-上游 repo 也是 Claude Code 外掛市集：`claude plugin marketplace add DeusData/codebase-memory-mcp` 後 `claude plugin install codebase-memory@codebase-memory`，只註冊 MCP 伺服器（skill、agent 與 hook 仍要用 `install`）；兩種擇一，同時用會跑兩份伺服器。Windows 已知問題與繞法見 [`docs/WINDOWS_TROUBLESHOOTING.md`](docs/WINDOWS_TROUBLESHOOTING.md)。
+上游 repo 也是 Claude Code 外掛市集：`claude plugin marketplace add DeusData/codebase-memory-mcp` 後 `claude plugin install codebase-memory@codebase-memory`，只註冊 MCP 伺服器（skill、agent 與 hook 仍要用 `install`）；兩種擇一，同時用會跑兩份伺服器。`install --no-hooks` 會移除本工具管理的 hook 並保留 MCP 註冊，選擇會持續到之後的安裝與更新；`install --hooks` 恢復。Windows 已知問題與繞法見 [`docs/WINDOWS_TROUBLESHOOTING.md`](docs/WINDOWS_TROUBLESHOOTING.md)。
 
 ## 開發環境（本 fork）
 

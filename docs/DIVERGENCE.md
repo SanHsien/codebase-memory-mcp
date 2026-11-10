@@ -29,7 +29,7 @@
 | `internal/cbm/extract_dbt.c` | Jinja 樹的 ref 收集與最右字串搜尋為無上限遞迴 | 改用 `TSNodeStack` 迭代 | 深巢狀 Jinja 使 SQL 抽取 stack overflow（ASan 實測） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_stack_overflow.c` | — | 新增 dbt 深巢狀測試、批次 B／U／V 的效能與深巢狀測試 | 對應 extract_dbt.c 修正 | 隨 extract_dbt.c 一起處理 |
 | `internal/cbm/extract_imports.c` | 內嵌 script 搜尋用 1024 格固定堆疊，滿了就丟棄最前面的兄弟節點；內嵌區塊走訪不套用節點預算 | 改用可成長的 `TSNodeStack`；子走訪沿用並回報節點預算 | `<script>` 後面接大量標記時，元件的定義全部遺失（有回歸測試）；巨大 script 區塊繞過走訪上限 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `internal/cbm/extract_defs.c` | ObjectScript Trigger 本體寫入 512 位元組緩衝區、tab 未跳脫；SqlMap globals 未跳脫 | 緩衝區留足包裝空間、跳脫 tab 與控制字元；globals 複製時跳脫；C++ 模板鏈改迭代；Elixir `defimpl`／`defprotocol`、函式 QN 帶模組（`when` 守衛與同名子句合併上游已自己做，2026-11 同步時採用上游版本）；一行多名稱宣告（Go 欄位與變數、Java 欄位、C 全域）全部輸出；裝飾器間的註解不再中斷路由；doc memo 的 LRU 修正；同一行宣告的多個欄位只有第一個帶文件註解 | 長 Trigger 的 docstring 是不合法 JSON（有回歸測試）；深模板鏈 stack overflow、Elixir 定義遺失或合併、第二個以後的名稱遺失、TS 路由遺失、2 萬個裝飾器方法平方時間（皆有回歸測試）；註解複製到每個名稱時，上游的文件連結會把同一段註解的參照重複算（C# 實測 2 條變 6 條，有上游測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `internal/cbm/extract_defs.c` | ObjectScript Trigger 本體寫入 512 位元組緩衝區、tab 未跳脫；SqlMap globals 未跳脫 | 緩衝區留足包裝空間、跳脫 tab 與控制字元；globals 複製時跳脫；C++ 模板鏈改迭代；Elixir `defimpl`／`defprotocol`、函式 QN 帶模組（`when` 守衛與同名子句合併上游已自己做，2026-11 同步時採用上游版本）；一行多名稱宣告（Go 欄位與變數、Java 欄位、C 全域）全部輸出；裝飾器間的註解不再中斷路由（`extract_decorators`／`extract_route_from_decorators` 改吃 `CBMExtractCtx`；2026-11-10 併入上游 Retrofit 的 `retrofit_client_route` 時沿用這個簽名）；doc memo 的 LRU 修正；同一行宣告的多個欄位只有第一個帶文件註解 | 長 Trigger 的 docstring 是不合法 JSON（有回歸測試）；深模板鏈 stack overflow、Elixir 定義遺失或合併、第二個以後的名稱遺失、TS 路由遺失、2 萬個裝飾器方法平方時間（皆有回歸測試）；註解複製到每個名稱時，上游的文件連結會把同一段註解的參照重複算（C# 實測 2 條變 6 條，有上游測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_store_nodes.c` | — | 新增 QN 後綴精確比對、覆蓋率影子圖重建、批次寫入交易測試 | 對應 store.c 修正 | 隨 store.c 一起處理 |
 | `internal/cbm/extract_calls.c` | 字串字面值只剝雙／單引號；callee 文字為整條接收者鏈；Lisp 類語言每個呼叫都回溯全部祖先 | 剝反引號與 r/f/b/u 前綴、三引號；callee 文字超過 512 位元組只留末段；祖先回溯上限 32 層並用走訪游標 | Go 反引號路由遺失；3 萬段 JS 方法鏈卡死；Clojure 5000 層巢狀卡死（皆有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/extract_channels.c` | 第一個參數的任何節點都取第一段字串當頻道名 | 只對純字串包裝節點取值；接收者文字上限 256 位元組 | `"user:" + id` 被記成頻道 `user:`（有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
@@ -55,8 +55,6 @@
 | `tests/test_php_lsp.c` | — | 新增回歸測試 | 對應 php_lsp.c 修正 | 隨 php_lsp.c 一起處理 |
 | `tests/test_py_lsp.c` | — | 新增回歸測試 | 對應 py_lsp.c 修正 | 隨 py_lsp.c 一起處理 |
 | `internal/cbm/helpers.h` | — | 宣告 `cbm_elixir_module_name` | 定義端與作用域追蹤共用同一套 Elixir 函式 QN 規則（模組限定），否則函式內的呼叫邊遺失；`when` 守衛拆解改用上游的 `cbm_elixir_def_head_unwrap_guard`（2026-11 同步） | 隨 extract_defs.c 一起處理 |
-| `src/pipeline/pipeline_incremental.c` | 控制檔掃描對每個目錄項目取檔案資訊，任一失敗就讓整個語意 manifest 失敗 | 只對目錄與控制檔名取檔案資訊，其餘依目錄列舉的類型略過（POSIX 類型未知時照舊） | Windows 上名為 `nul` 的檔案開到 NUL 裝置，每次索引都 `aborted_previous_preserved`（上游 issue #2646，本機實測重現；有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `tests/test_pipeline.c` | — | 新增 Windows `nul` 檔案的 manifest 回歸測試 | 對應 pipeline_incremental.c 修正 | 隨 pipeline_incremental.c 一起處理 |
 | `internal/cbm/cbm.c` | Perl 巢狀過深的早退未記 `mark_done` | 補 `cbm_index_mark_done` | 正常略過被 supervisor 誤判為 crash 嫌疑。呼叫歸屬的「呼叫×定義」迴圈上游已自己改快（2026-10-16 同步時採用上游版本） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `scripts/ci/new-protected-temp-root.ps1` | 以 `Set-Acl` 設定 ACL | 改用 `DirectoryInfo.SetAccessControl` | `Set-Acl` 需要 SeSecurityPrivilege，非管理員無法執行測試 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_cypher.c` | — | 交叉連接上限斷言 | 對應 cypher.c 修正 | 隨 cypher.c 一起處理 |

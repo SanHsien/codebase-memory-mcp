@@ -17,3 +17,4 @@ Fork maintenance changes only; for product changes see upstream releases.
 - Synced upstream to `a7158ac` (v0.12.1) and `10ab613` (2026-10-24, 294 commits) with an incremental triage record; the watcher UTF-8 path handling and Rust generic impls now use the upstream version; the TS LSP walk cap is halved (512 levels exhausted the 8 MiB stack under ASan).
 - Windows fix: a file named `nul` in a repository aborted every index run (upstream issue #2646).
 - Removed `GEMINI.md`; its content is merged into `AGENTS.md`.
+- Synced upstream to `edfb824f` (2026-11-10; 85 commits, 15 merged PRs) with an incremental triage record; the `nul` file walk fix now uses the upstream version and its divergence row is removed.

@@ -4919,6 +4919,77 @@ TEST(incremental_dockerfile_edit_keeps_build_edges) {
     PASS();
 }
 
+/* Editing a Retrofit interface keeps its requests as HTTP_CALLS (#2723): the
+ * incremental routes re-extract the file and must not mint HANDLES for it.
+ * `legacy`: through the full-load route, else the closure-repair route. Returns "full=calls/handles
+ * inc=calls/handles", or NULL; *route: the route taken. */
+static char *incremental_retrofit_keep(bool legacy, cbm_incremental_route_t *route) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_retrofitkeep_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        return NULL;
+    }
+    write_temp_file(tmp, "src/OrderApi.kt",
+                    "package com.acme\n\nimport retrofit2.http.GET\nimport retrofit2.http.POST\n\n"
+                    "interface OrderApi {\n"
+                    "    @GET(\"/v1/orders/{id}\")\n    suspend fun getOrder(id: String): String\n"
+                    "    @POST(\"v1/orders\")\n    suspend fun createOrder(body: String): String\n"
+                    "}\n");
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/retrofitkeep.db", tmp);
+    static const char calls[] = "SELECT COUNT(*) FROM edges e JOIN nodes r ON r.id=e.target_id "
+                                "WHERE e.type='HTTP_CALLS' AND r.label='Route' "
+                                "AND r.qualified_name IN ('__route__GET__/v1/orders/{}',"
+                                "'__route__POST__/v1/orders')";
+    static const char handles[] = "SELECT COUNT(*) FROM edges WHERE type='HANDLES'";
+    int full_calls = -1;
+    int full_handles = -1;
+    if (k8s_inc_index(tmp, db_path) == 0) {
+        full_calls = k8s_inc_count(db_path, calls);
+        full_handles = k8s_inc_count(db_path, handles);
+    }
+    write_temp_file(tmp, "src/OrderApi.kt",
+                    "package com.acme\n\nimport retrofit2.http.GET\nimport retrofit2.http.POST\n\n"
+                    "// edited\ninterface OrderApi {\n"
+                    "    @GET(\"/v1/orders/{id}\")\n    suspend fun getOrder(id: String): String\n"
+                    "    @POST(\"v1/orders\")\n    suspend fun createOrder(body: String): String\n"
+                    "}\n");
+#if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
+    if (legacy) {
+        cbm_pipeline_incremental_test_force_legacy_partial_once();
+    }
+#else
+    (void)legacy;
+#endif
+    char *out = NULL;
+    if (k8s_inc_index(tmp, db_path) == 0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "full=%d/%d inc=%d/%d", full_calls, full_handles,
+                 k8s_inc_count(db_path, calls), k8s_inc_count(db_path, handles));
+        out = strdup(buf);
+    }
+    *route = cbm_pipeline_incremental_test_last_route();
+    th_rmtree(tmp);
+    return out;
+}
+
+TEST(incremental_edit_keeps_retrofit_http_calls_issue2723) {
+    cbm_incremental_route_t route = CBM_INCREMENTAL_ROUTE_NONE;
+    char *got = incremental_retrofit_keep(false, &route);
+    ASSERT_EQ(route, CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "full=2/0 inc=2/0");
+    free(got);
+#if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
+    got = incremental_retrofit_keep(true, &route);
+    ASSERT_EQ(route, CBM_INCREMENTAL_ROUTE_LEGACY_PARTIAL);
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "full=2/0 inc=2/0");
+    free(got);
+#endif
+    PASS();
+}
+
 /* A compose file's edit replaces its build edges: the renamed image keeps
  * no edge (nor node), the new one has its edge. `legacy`: through the
  * full-load route, else the closure-repair route. Returns "old=N new=M"
@@ -9669,72 +9740,6 @@ TEST(pipeline_semantic_manifest_rejects_non_directory_root) {
     PASS();
 }
 
-#ifdef _WIN32
-/* Create (or delete) dir\name through the \\?\ prefix, which bypasses Win32's
- * device-name mapping: a plain `dir\nul` is the NUL device, not a file. */
-static bool pipeline_test_device_named_file(const char *dir, const char *name, bool create) {
-    char path[1024];
-    snprintf(path, sizeof(path), "\\\\?\\%s\\%s", dir, name);
-    for (char *p = path + 4; *p; p++) {
-        if (*p == '/') {
-            *p = '\\';
-        }
-    }
-    wchar_t *wpath = cbm_utf8_to_wide(path);
-    if (!wpath) {
-        return false;
-    }
-    bool ok;
-    if (create) {
-        HANDLE h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                               NULL);
-        ok = h != INVALID_HANDLE_VALUE;
-        if (ok) {
-            CloseHandle(h);
-        }
-    } else {
-        ok = DeleteFileW(wpath) != 0;
-    }
-    free(wpath);
-    return ok;
-}
-
-/* A file named `nul` (Git Bash makes one from `cmd > nul`) cannot be inspected
- * through an ordinary Win32 path. It is not a control file, so the control-file
- * scan must not fail the whole manifest on it: that aborted every index run of
- * the repository with aborted_previous_preserved (upstream issue #2646). */
-TEST(pipeline_semantic_manifest_tolerates_windows_device_named_file) {
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "/tmp/cbm_manifest_nul_XXXXXX");
-    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
-    write_temp_file(tmp, "main.py", "def hello():\n    return 1\n");
-    write_temp_file(tmp, ".gitignore", "nul\n");
-    bool made = pipeline_test_device_named_file(tmp, "nul", true);
-
-    cbm_file_hash_t *manifest = NULL;
-    int manifest_count = -1;
-    int rc = made ? cbm_pipeline_build_semantic_manifest(NULL, "manifest-nul", tmp, NULL, 0, NULL,
-                                                         0, NULL, NULL, &manifest, &manifest_count)
-                  : -1;
-    bool has_gitignore = false;
-    for (int i = 0; i < manifest_count; i++) {
-        if (manifest[i].rel_path && strcmp(manifest[i].rel_path, ".gitignore") == 0) {
-            has_gitignore = true;
-        }
-    }
-    cbm_pipeline_free_semantic_manifest(manifest, manifest_count > 0 ? manifest_count : 0);
-    if (made) {
-        (void)pipeline_test_device_named_file(tmp, "nul", false);
-    }
-    th_rmtree(tmp);
-
-    ASSERT_TRUE(made);
-    ASSERT_EQ(rc, 0);
-    ASSERT_TRUE(has_gitignore);
-    PASS();
-}
-#endif
-
 #ifndef _WIN32
 /* A nested directory the process cannot open (permission-denied) must not
  * abort the whole manifest walk: it has no control files to contribute, so
@@ -9773,6 +9778,108 @@ TEST(pipeline_semantic_manifest_skips_unreadable_subdirectory) {
     PASS();
 }
 #endif /* !_WIN32 */
+
+#ifdef _WIN32
+/* Create or delete a real file named nul in dir, as a Git Bash redirect such
+ * as `cmd > nul` leaves behind (#2646). The plain Win32 path <dir>/nul names
+ * the NUL device, so the file is reached only through the extended-length
+ * namespace, which needs an absolute path with backslashes (CI's TEMP uses
+ * forward slashes). */
+static bool pipeline_test_nul_file(const char *dir, bool create) {
+    enum { NUL_PATH_CAP = 1024, PREFIX_LEN = 4, LEAF_LEN = 4 };
+    static const wchar_t prefix[] = L"\\\\?\\";
+    static const wchar_t leaf[] = L"\\nul";
+    wchar_t path[NUL_PATH_CAP];
+    const DWORD room = NUL_PATH_CAP - PREFIX_LEN - LEAF_LEN;
+    wchar_t *wide_dir = cbm_utf8_to_wide(dir);
+    DWORD length = wide_dir ? GetFullPathNameW(wide_dir, room, path + PREFIX_LEN, NULL) : 0;
+    free(wide_dir);
+    if (length == 0 || length >= room) {
+        return false;
+    }
+    wmemcpy(path, prefix, PREFIX_LEN);
+    wmemcpy(path + PREFIX_LEN + length, leaf, LEAF_LEN + 1);
+    if (!create) {
+        return DeleteFileW(path) != 0;
+    }
+    HANDLE file =
+        CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CloseHandle(file);
+    return true;
+}
+
+/* #2646: the control-file walk cannot inspect a file named nul through the
+ * plain path, and it never needs to: only directories and control files can
+ * contribute to the manifest. Listing nul in .gitignore does not help, since
+ * the walk visits every entry. */
+TEST(pipeline_semantic_manifest_skips_nul_device_file_issue2646) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_manifest_nul_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    write_temp_file(tmp, "app.py", "def NulNeighbor():\n    return 1\n");
+    write_temp_file(tmp, ".gitignore", "nul\n");
+    bool created = pipeline_test_nul_file(tmp, true);
+
+    cbm_file_hash_t *manifest = NULL;
+    int manifest_count = -1;
+    int rc = cbm_pipeline_build_semantic_manifest(NULL, "manifest-skip-nul", tmp, NULL, 0, NULL, 0,
+                                                  NULL, NULL, &manifest, &manifest_count);
+    bool found_gitignore = false;
+    for (int i = 0; i < manifest_count; i++) {
+        if (manifest[i].rel_path && strcmp(manifest[i].rel_path, ".gitignore") == 0) {
+            found_gitignore = true;
+        }
+    }
+    cbm_pipeline_free_semantic_manifest(manifest, manifest_count > 0 ? manifest_count : 0);
+    bool deleted = created && pipeline_test_nul_file(tmp, false);
+    th_rmtree(tmp);
+
+    ASSERT_TRUE(created);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(found_gitignore);
+    ASSERT_TRUE(deleted);
+    PASS();
+}
+
+/* The user-visible half of #2646: one such file made every index run return
+ * CBM_PIPELINE_ABORT_PRESERVE_DB (aborted_previous_preserved), so a new
+ * project never got an index. */
+TEST(pipeline_full_index_survives_nul_device_file_issue2646) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_index_nul_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    write_temp_file(tmp, "app.py", "def NulNeighbor():\n    return 1\n");
+    write_temp_file(tmp, ".gitignore", "nul\n");
+    bool created = pipeline_test_nul_file(tmp, true);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/generation.db", tmp);
+    cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int run_rc = pipeline ? cbm_pipeline_run(pipeline) : -1;
+    char project[256] = "";
+    if (pipeline) {
+        snprintf(project, sizeof(project), "%s", cbm_pipeline_project_name(pipeline));
+        cbm_pipeline_free(pipeline);
+    }
+    int indexed = -1;
+    cbm_store_t *store = cbm_store_open_path_query(db_path);
+    if (store) {
+        indexed = named_node_count(store, project, "NulNeighbor");
+        cbm_store_close(store);
+    }
+    bool deleted = created && pipeline_test_nul_file(tmp, false);
+    th_rmtree(tmp);
+
+    ASSERT_TRUE(created);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(indexed, 1);
+    ASSERT_TRUE(deleted);
+    PASS();
+}
+#endif /* _WIN32 */
 
 /* A fully validated staged graph must be able to recover from a definitely
  * non-SQLite destination without deleting evidence or overwriting an earlier
@@ -12672,6 +12779,9 @@ TEST(pipeline_go_rw_usage_never_cross_into_c) {
  * the generic-engine lane on its 12-language fixture). A Rust call never
  * targets another language's definition. pad_files > 0 forces the parallel
  * resolver, whose Rust registry is the shared all-defs build. */
+static int imports_binding_count(cbm_store_t *s, const char *project, const char *file_path,
+                                 const char *local_name);
+
 /* Pads a Rust fixture with pad_files filler modules (pad_files > 0 forces the
  * parallel resolver: CBM_WORKERS=4 for the run), runs the full pipeline into
  * <tmp>/<db_name> and opens the store. NULL store = the run failed. */
@@ -12771,6 +12881,54 @@ TEST(pipeline_rust_call_never_binds_another_language) {
 
 TEST(pipeline_rust_call_never_binds_another_language_parallel) {
     return rust_registry_rust_only_case(52);
+}
+
+TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922) {
+    enum { MANY_BYTES = 64 * 1024 };
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_grouped_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "src/h.rs",
+                    "pub struct Handler { pub n: u32 }\n"
+                    "impl Handler { pub fn new() -> Handler { Handler { n: 1 } } }\n"
+                    "pub struct Other;\n");
+
+    char *many = (char *)malloc(MANY_BYTES);
+    ASSERT_NOT_NULL(many);
+    size_t off = 0;
+    for (int i = 0; i < 300; i++) {
+        int n = snprintf(many + off, MANY_BYTES - off,
+                         "pub struct S%d;\nimpl S%d { pub fn new() -> S%d { S%d } }\n", i, i, i,
+                         i);
+        ASSERT_TRUE(n > 0 && (size_t)n < MANY_BYTES - off);
+        off += (size_t)n;
+    }
+    write_temp_file(tmp, "src/many.rs", many);
+    free(many);
+
+    write_temp_file(tmp, "src/main.rs",
+                    "mod h;\n"
+                    "mod many;\n"
+                    "use crate::h::{Handler, Other};\n"
+                    "fn grouped() -> u32 { let _o = Other; Handler::new().n }\n"
+                    "fn main() { grouped(); }\n");
+
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, 0, "rust_grouped.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    ASSERT_EQ(imports_binding_count(s, project, "src/main.rs", "Handler"), 1);
+    ASSERT_EQ(imports_binding_count(s, project, "src/main.rs", "Other"), 1);
+    ASSERT_GTE(named_edge_to_file_count(s, project, "CALLS", "grouped", "new", "src/h.rs"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
 }
 
 /* `Opts::write(true)` is an associated function. The LSP leaves it to the
@@ -13076,6 +13234,169 @@ TEST(pipeline_rust_std_receiver_never_binds_project_method) {
 
 TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel) {
     return run_rust_std_receiver_probe(52, "par");
+}
+
+/* IMPORTS edges from the file at src_file whose local_name is local and whose
+ * target node lives in target_file (any target when NULL). -1 on a query
+ * failure. */
+static int rust_import_into_file_count(cbm_store_t *s, const char *project, const char *src_file,
+                                       const char *local, const char *target_file) {
+    static const char sql[] =
+        "SELECT count(*) FROM edges e JOIN nodes f ON f.id=e.source_id "
+        "JOIN nodes t ON t.id=e.target_id WHERE e.project=?1 AND e.type='IMPORTS' "
+        "AND f.file_path=?2 AND json_extract(e.properties,'$.local_name')=?3 "
+        "AND (?4 IS NULL OR t.file_path=?4)";
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_stmt *st = NULL;
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    int count = -1;
+    if (sqlite3_bind_text(st, 1, project, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 2, src_file, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 3, local, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        (target_file ? sqlite3_bind_text(st, 4, target_file, -1, SQLITE_TRANSIENT)
+                     : sqlite3_bind_null(st, 4)) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        count = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+/* CALLS edges from a node named src_name to a node named tgt_name carrying the
+ * given resolution strategy. -1 on a query failure. */
+static int rust_calls_by_strategy_count(cbm_store_t *s, const char *project, const char *src_name,
+                                        const char *tgt_name, const char *strategy) {
+    static const char sql[] =
+        "SELECT count(*) FROM edges e JOIN nodes f ON f.id=e.source_id "
+        "JOIN nodes t ON t.id=e.target_id WHERE e.project=?1 AND e.type='CALLS' "
+        "AND f.name=?2 AND t.name=?3 AND json_extract(e.properties,'$.strategy')=?4";
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_stmt *st = NULL;
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    int count = -1;
+    if (sqlite3_bind_text(st, 1, project, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 2, src_name, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 3, tgt_name, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 4, strategy, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        count = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+/* A Cargo workspace of two crates that both define util::helper and
+ * net::proto::encode. A relative `use` names a path inside the importing
+ * crate, so `crate::util::helper` and `super::proto::encode` from beta bind
+ * beta's items, never alpha's (the project-wide name fallback took the
+ * lexicographically smallest QN, i.e. always alpha). `serde_json::json` names
+ * an external crate: no project symbol may stand in for it, so alpha's `json`
+ * function gets neither the IMPORTS edge nor the import_map CALLS of `json!`
+ * (nor alpha's `env` the `use std::env` of beta's build script, a crate root),
+ * and `crate::util::Gone`, an item beta does not define, binds nothing: its
+ * `util` segment names a module, never alpha's function `util`.
+ * `alpha_core::util::helper` names a workspace member (package `alpha-core`)
+ * and still binds into alpha. pad_files > 0 forces the parallel resolver. */
+static int rust_workspace_relative_import_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_ws_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/alpha\", \"crates/beta\"]\n");
+    write_temp_file(tmp, "crates/alpha/Cargo.toml",
+                    "[package]\nname = \"alpha-core\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "crates/alpha/src/lib.rs",
+                    "pub mod net;\npub mod util;\n\npub fn json() -> u32 {\n    7\n}\n\n"
+                    "pub fn env() -> u32 {\n    8\n}\n\npub fn util() -> u32 {\n    9\n}\n");
+    write_temp_file(tmp, "crates/alpha/src/util.rs", "pub fn helper() -> u32 {\n    1\n}\n");
+    write_temp_file(tmp, "crates/alpha/src/net/mod.rs", "pub mod proto;\n");
+    write_temp_file(tmp, "crates/alpha/src/net/proto.rs", "pub fn encode() -> u32 {\n    10\n}\n");
+    write_temp_file(tmp, "crates/beta/Cargo.toml",
+                    "[package]\nname = \"beta\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "crates/beta/src/lib.rs",
+                    "pub mod bridge;\npub mod net;\npub mod run;\npub mod util;\n");
+    write_temp_file(tmp, "crates/beta/src/util.rs", "pub fn helper() -> u32 {\n    2\n}\n");
+    write_temp_file(tmp, "crates/beta/src/net/mod.rs", "pub mod client;\npub mod proto;\n");
+    write_temp_file(tmp, "crates/beta/src/net/proto.rs", "pub fn encode() -> u32 {\n    20\n}\n");
+    write_temp_file(tmp, "crates/beta/src/net/client.rs",
+                    "use super::proto::encode;\n"
+                    "\n"
+                    "pub fn send() -> u32 {\n"
+                    "    encode()\n"
+                    "}\n");
+    write_temp_file(tmp, "crates/beta/src/run.rs",
+                    "use crate::util::helper;\n"
+                    "use crate::util::Gone;\n"
+                    "use serde_json::json;\n"
+                    "\n"
+                    "pub fn go() -> u32 {\n"
+                    "    helper()\n"
+                    "}\n"
+                    "\n"
+                    "pub fn emit() -> u32 {\n"
+                    "    let _v = json!({\"a\": 1});\n"
+                    "    0\n"
+                    "}\n");
+    write_temp_file(tmp, "crates/beta/build.rs",
+                    "use std::env;\n\nfn main() {\n    let _ = env::var(\"OUT_DIR\");\n}\n");
+    write_temp_file(tmp, "crates/beta/src/bridge.rs",
+                    "use alpha_core::util::helper;\n"
+                    "\n"
+                    "pub fn cross() -> u32 {\n"
+                    "    helper()\n"
+                    "}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_ws.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    static const char run_rs[] = "crates/beta/src/run.rs";
+    static const char client_rs[] = "crates/beta/src/net/client.rs";
+    static const char bridge_rs[] = "crates/beta/src/bridge.rs";
+    static const char beta_util[] = "crates/beta/src/util.rs";
+    static const char alpha_util[] = "crates/alpha/src/util.rs";
+    static const char beta_proto[] = "crates/beta/src/net/proto.rs";
+    static const char alpha_proto[] = "crates/alpha/src/net/proto.rs";
+
+    /* crate:: stays in beta. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, run_rs, "helper", beta_util), 1);
+    ASSERT_EQ(rust_import_into_file_count(s, project, run_rs, "helper", alpha_util), 0);
+    ASSERT_GTE(named_edge_to_file_count(s, project, "CALLS", "go", "helper", beta_util), 1);
+    ASSERT_EQ(named_edge_to_file_count(s, project, "CALLS", "go", "helper", alpha_util), 0);
+    /* super:: is relative to net::client inside beta. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, client_rs, "encode", beta_proto), 1);
+    ASSERT_EQ(rust_import_into_file_count(s, project, client_rs, "encode", alpha_proto), 0);
+    ASSERT_GTE(named_edge_to_file_count(s, project, "CALLS", "send", "encode", beta_proto), 1);
+    ASSERT_EQ(named_edge_to_file_count(s, project, "CALLS", "send", "encode", alpha_proto), 0);
+    /* An external crate's macro is no project symbol. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, run_rs, "json", NULL), 0);
+    ASSERT_EQ(rust_calls_by_strategy_count(s, project, "emit", "json", "import_map"), 0);
+    ASSERT_EQ(rust_import_into_file_count(s, project, "crates/beta/build.rs", "env", NULL), 0);
+    /* A path segment above the item names a module, never alpha's fn util. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, run_rs, "Gone", NULL), 0);
+    /* A workspace member named by its crate name binds into that member. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, bridge_rs, "helper", alpha_util), 1);
+    ASSERT_GTE(named_edge_to_file_count(s, project, "CALLS", "cross", "helper", alpha_util), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_rust_workspace_relative_import_stays_in_crate) {
+    return rust_workspace_relative_import_case(0);
+}
+
+TEST(pipeline_rust_workspace_relative_import_stays_in_crate_parallel) {
+    return rust_workspace_relative_import_case(52);
 }
 
 static int count_nodes_named(cbm_store_t *s, const char *project, const char *name);
@@ -31959,12 +32280,15 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c_parallel);
     RUN_TEST(pipeline_rust_call_never_binds_another_language);
     RUN_TEST(pipeline_rust_call_never_binds_another_language_parallel);
+    RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922);
     RUN_TEST(pipeline_rust_assoc_call_never_binds_free_namesake);
     RUN_TEST(pipeline_rust_assoc_call_never_binds_free_namesake_parallel);
     RUN_TEST(pipeline_rust_generic_impl_method_sources_its_calls);
     RUN_TEST(pipeline_rust_generic_impl_method_sources_its_calls_parallel);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
+    RUN_TEST(pipeline_rust_workspace_relative_import_stays_in_crate);
+    RUN_TEST(pipeline_rust_workspace_relative_import_stays_in_crate_parallel);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field);
@@ -32328,6 +32652,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_script_request_to_compose_service_keeps_host);
     RUN_TEST(incremental_deleted_dockerfile_drops_its_image);
     RUN_TEST(incremental_dockerfile_edit_keeps_build_edges);
+    RUN_TEST(incremental_edit_keeps_retrofit_http_calls_issue2723);
     RUN_TEST(incremental_compose_edit_replaces_build_edges);
     RUN_TEST(incremental_env_edit_replaces_scoped_envvars);
     RUN_TEST(incremental_image_split_change_rebuilds);
@@ -32426,11 +32751,12 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(pipeline_adr_migrate_failure_preserves_generation);
     RUN_TEST(pipeline_adr_legacy_migrates_before_forced_reindex);
     RUN_TEST(pipeline_semantic_manifest_rejects_non_directory_root);
-#ifdef _WIN32
-    RUN_TEST(pipeline_semantic_manifest_tolerates_windows_device_named_file);
-#endif
 #ifndef _WIN32
     RUN_TEST(pipeline_semantic_manifest_skips_unreadable_subdirectory);
+#endif
+#ifdef _WIN32
+    RUN_TEST(pipeline_semantic_manifest_skips_nul_device_file_issue2646);
+    RUN_TEST(pipeline_full_index_survives_nul_device_file_issue2646);
 #endif
     RUN_TEST(pipeline_full_reindex_quarantines_corrupt_destination_without_overwrite);
     RUN_TEST(pipeline_full_reindex_replaces_legacy_schema_without_quarantine);
