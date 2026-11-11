@@ -1591,6 +1591,36 @@ TEST(platform_lower_cpu_priority_nices_the_process) {
 #endif
 }
 
+/* F7 (independent review): a directory-entry name too long for cbm_dirent_t was cut at the
+ * byte limit, which can leave half a UTF-8 sequence at the end. The cut now backs up to a
+ * character boundary. */
+TEST(utf8_prefix_len_never_splits_a_character) {
+    char name[16];
+    /* "ab" + U+20AC (E2 82 AC) + "c": 6 bytes; every cut inside the euro sign backs up to 2. */
+    memcpy(name, "ab\xE2\x82\xAC" "c", 6);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 6), 6);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 5), 5); /* "ab" + euro */
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 4), 2);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 3), 2);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 2), 2);
+    /* A 4-byte sequence (U+1F600): cuts at 1..3 bytes into it all back up to its start. */
+    memcpy(name, "x\xF0\x9F\x98\x80y", 6);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 4), 1);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 3), 1);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 2), 1);
+    ASSERT_EQ(cbm_utf8_prefix_len(name, 6, 5), 5);
+    /* The real limit: a name of 1022 ASCII bytes then a 3-byte character is cut to 1022. */
+    char *big = malloc(CBM_DIRENT_NAME_MAX + 8);
+    ASSERT_NOT_NULL(big);
+    memset(big, 'a', CBM_DIRENT_NAME_MAX - 2);
+    memcpy(big + CBM_DIRENT_NAME_MAX - 2, "\xE2\x82\xAC", 3);
+    size_t big_len = CBM_DIRENT_NAME_MAX + 1;
+    ASSERT_EQ(cbm_utf8_prefix_len(big, big_len, CBM_DIRENT_NAME_MAX - 1),
+              (size_t)CBM_DIRENT_NAME_MAX - 2);
+    free(big);
+    PASS();
+}
+
 SUITE(platform) {
 #ifdef _WIN32
     RUN_TEST(platform_replace_file_retries_while_a_scanner_holds_the_destination);
@@ -1638,6 +1668,7 @@ SUITE(platform) {
     RUN_TEST(regex_compile_refuses_overlong_pattern);
     RUN_TEST(regex_compile_accepts_ordinary_intervals);
     RUN_TEST(regex_estimate_counts_brackets_and_escapes_literally);
+    RUN_TEST(utf8_prefix_len_never_splits_a_character);
 #ifdef __linux__
     RUN_TEST(cgroup_v2_cpu_quota);
     RUN_TEST(cgroup_v2_cpu_quota_rounds_up);

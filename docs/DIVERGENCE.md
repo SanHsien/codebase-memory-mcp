@@ -78,11 +78,11 @@
 | `tests/test_store_search.c` | — | 新增 hint 邊界案例斷言 | 對應 store.c 修正 | 隨 store.c 一起處理 |
 | `src/graph_buffer/graph_buffer.c` | `cbm_gbuf_load_from_db` 不檢查 `sqlite3_step` 結束碼、不檢查 id 是否為負 | 讀取未以 SQLITE_DONE 結束就回傳失敗；負 id 不寫入重新對應表 | 讀取中途失敗會得到被截斷的圖並被後續寫回覆蓋資料庫；負 id 造成越界寫入（無法以測試重現，屬防禦性修正） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_graph_buffer.c` | — | 新增負節點 id 測試 | 對應 graph_buffer.c 修正（修正前也通過，僅作冒煙測試） | 隨 graph_buffer.c 一起處理 |
-| `src/foundation/compat_fs.c` | Windows `cbm_readdir` 遇到無法轉成 UTF-8 的檔名就結束整個目錄列舉 | 略過該項目並繼續列舉；新增 `cbm_win_replace_file_retry`（暫時性共享衝突時重試的原子取代） | NTFS 允許孤立代理字元檔名，其後檔案從索引消失；掃描程式短暫鎖檔會讓 ReplaceFileW 回 1175，設定檔寫入隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `tests/test_platform.c` | — | 新增孤立代理字元檔名列舉測試、掃描程式鎖檔時取代重試測試 | 對應 compat_fs.c 修正 | 隨 compat_fs.c 一起處理 |
+| `src/foundation/compat_fs.c` | Windows `cbm_readdir` 遇到無法轉成 UTF-8 的檔名就結束整個目錄列舉；目錄項名稱超過緩衝上限時在位元組處截斷，可能切斷 UTF-8 字元 | 略過該項目並繼續列舉；新增 `cbm_win_replace_file_retry`（暫時性共享衝突時重試的原子取代）；新增 `cbm_utf8_prefix_len`，截斷退回字元邊界（Windows 與 POSIX 的 `cbm_readdir` 共用） | NTFS 允許孤立代理字元檔名，其後檔案從索引消失；掃描程式短暫鎖檔會讓 ReplaceFileW 回 1175，設定檔寫入隨機失敗；截斷後的名稱成為無效 UTF-8（獨立覆核發現，有單元測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_platform.c` | — | 新增孤立代理字元檔名列舉測試、掃描程式鎖檔時取代重試測試；新增 UTF-8 截斷邊界測試 | 對應 compat_fs.c 修正；對應 compat_fs.c 的 UTF-8 截斷修正 | 隨 compat_fs.c 一起處理 |
 | `src/main.c` | `daemon --port=` 以 `atoi` 解析 | 改用 `strtol` 並檢查結尾與範圍 | `80abc` 被當成 80；溢位為未定義行為 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/ui/httpd.c` | Windows 設定 `SO_EXCLUSIVEADDRUSE` 失敗時仍繼續 bind | 失敗即關閉 socket 並回傳 NULL | 失敗會退回一般 bind，其他本機使用者可搶佔連接埠 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/foundation/compat_fs.h` | — | 宣告 `cbm_win_replace_file_retry`（Windows） | 供四個設定檔編輯器共用 | 隨 compat_fs.c 一起處理 |
+| `src/foundation/compat_fs.h` | — | 宣告 `cbm_win_replace_file_retry`（Windows）；宣告 `cbm_utf8_prefix_len` | 供四個設定檔編輯器共用；供 compat_fs.c 兩個 `cbm_readdir` 共用 | 隨 compat_fs.c 一起處理 |
 | `src/cli/config_text_edit.c` | Windows 以 `ReplaceFileW`／`MoveFileExW` 取代，失敗即放棄 | 改呼叫 `cbm_win_replace_file_retry` | 掃描程式或索引器短暫握住檔案時（錯誤 1175）安裝／解除安裝隨機失敗 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/cli/config_json_like.c` | 同上 | 同上 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/cli/config_toml_edit.c` | Windows 以 `ReplaceFileW`／`MoveFileExW` 取代，失敗即放棄；跨行陣列內以 `[` 開頭的行被當成表頭 | 改呼叫 `cbm_win_replace_file_retry`；掃描狀態一併追蹤未閉合的 `[`，陣列內不解析表頭；值為跨行陣列的鍵不就地取代 | 掃描程式或索引器短暫握住檔案時（錯誤 1175）安裝／解除安裝隨機失敗。Codex 路徑含空白的問題上游已自己修好（採用上游版本）；跨行陣列的元素 `  [1]` 截斷所屬表，移除後留下殘缺 TOML、合法檔案被拒（有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |

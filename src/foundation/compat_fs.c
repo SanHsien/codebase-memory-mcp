@@ -14,6 +14,18 @@
 #include <string.h>
 #include <stdint.h>
 
+size_t cbm_utf8_prefix_len(const char *s, size_t len, size_t max_bytes) {
+    if (len <= max_bytes) {
+        return len;
+    }
+    size_t cut = max_bytes;
+    /* Step back over continuation bytes (10xxxxxx) so s[cut] starts a character. */
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) {
+        cut--;
+    }
+    return cut;
+}
+
 #ifdef _WIN32
 
 /* ── Windows implementation ────────────────────────────────── */
@@ -117,10 +129,7 @@ cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
             return NULL;
         }
     }
-    size_t nlen = strlen(u8);
-    if (nlen >= CBM_DIRENT_NAME_MAX) {
-        nlen = CBM_DIRENT_NAME_MAX - SKIP_ONE;
-    }
+    size_t nlen = cbm_utf8_prefix_len(u8, strlen(u8), CBM_DIRENT_NAME_MAX - SKIP_ONE);
     memcpy(d->entry.name, u8, nlen);
     d->entry.name[nlen] = '\0';
     free(u8);
@@ -862,10 +871,8 @@ cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
              (de->d_name[SKIP_ONE] == '.' && de->d_name[PAIR_LEN] == '\0'))) {
             continue;
         }
-        size_t nlen = strlen(de->d_name);
-        if (nlen >= CBM_DIRENT_NAME_MAX) {
-            nlen = CBM_DIRENT_NAME_MAX - SKIP_ONE;
-        }
+        size_t nlen =
+            cbm_utf8_prefix_len(de->d_name, strlen(de->d_name), CBM_DIRENT_NAME_MAX - SKIP_ONE);
         memcpy(d->entry.name, de->d_name, nlen);
         d->entry.name[nlen] = '\0';
         unsigned char type = de->d_type;

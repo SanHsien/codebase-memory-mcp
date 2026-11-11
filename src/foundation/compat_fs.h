@@ -19,6 +19,11 @@
 
 typedef struct cbm_dir cbm_dir_t;
 
+/* Length of the longest prefix of the UTF-8 string s[0..len) that is at most max_bytes long
+ * and does not end inside a multi-byte sequence. Used when a name is cut to fit a fixed
+ * buffer, so the cut never leaves a dangling lead byte or half a code point. */
+size_t cbm_utf8_prefix_len(const char *s, size_t len, size_t max_bytes);
+
 typedef struct {
     char name[CBM_DIRENT_NAME_MAX];
     bool is_dir;
