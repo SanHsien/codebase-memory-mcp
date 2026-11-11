@@ -15382,8 +15382,22 @@ bool cbm_search_code_windows_path_matches_prefilter(const char *path, const char
 
 void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
                                     const char *file_pattern, const char *tmpfile,
-                                    const char *filelist, const char *root_path) {
+                                    const char *filelist, const char *root_path,
+                                    const char *file_pattern_file, const char *root_file) {
 #ifdef _WIN32
+    /* The file pattern and the project root are request/store data. PowerShell
+     * ends a single-quoted string at U+2018..U+201B as well as at ASCII ', so
+     * splicing either into the command line lets text after such a character run
+     * as code. Neither value is interpolated: the caller writes each to a private
+     * scratch file and the command reads it back with Get-Content -Raw. Only
+     * scratch paths the server itself created appear below. */
+    (void)root_path;
+    if (!tmpfile || !filelist || (file_pattern && !file_pattern_file) || (!scoped && !root_file)) {
+        /* A missing scratch path would otherwise fall back to a half-built
+         * command; fail the scan instead. */
+        snprintf(cmd, cmd_sz, "exit 2");
+        return;
+    }
     const char *sm = use_regex ? "" : " -SimpleMatch";
     if (scoped) {
         if (file_pattern) {
@@ -15391,12 +15405,13 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
                 cmd, cmd_sz,
                 "powershell -Command \"" CBM_PS_UTF8_PRELUDE
                 "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                "$fp = Get-Content -Raw -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                 "-LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction Stop }"
-                " | Where-Object { $_.Path -like '*%s' }"
+                " | Where-Object { $_.Path -like ('*' + $fp) }"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                tmpfile, filelist, sm, file_pattern);
+                tmpfile, file_pattern_file, filelist, sm);
         } else {
             snprintf(
                 cmd, cmd_sz,
@@ -15413,25 +15428,30 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
             snprintf(
                 cmd, cmd_sz,
                 "powershell -Command \"" CBM_PS_UTF8_PRELUDE
-                "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
+                "$root = Get-Content -Raw -Encoding UTF8 -LiteralPath '%s'; "
+                "$fp = Get-Content -Raw -Encoding UTF8 -LiteralPath '%s'; "
+                "Get-ChildItem -Recurse -Path ($root + '\\*') -Include $fp -File "
                 "-ErrorAction SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction Stop"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                root_path, file_pattern, tmpfile, sm);
+                root_file, file_pattern_file, tmpfile, sm);
         } else {
             snprintf(
                 cmd, cmd_sz,
                 "powershell -Command \"" CBM_PS_UTF8_PRELUDE
-                "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
+                "$root = Get-Content -Raw -Encoding UTF8 -LiteralPath '%s'; "
+                "Get-ChildItem -Recurse -Path ($root + '\\*') -File -ErrorAction "
                 "SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction Stop"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                root_path, tmpfile, sm);
+                root_file, tmpfile, sm);
         }
     }
 #else
+    (void)file_pattern_file;
+    (void)root_file;
     const char *flag = use_regex ? "-E" : "-F";
     if (scoped) {
         /* file_pattern was already applied to the canonical file list in C.
@@ -17068,6 +17088,15 @@ static bool validate_search_path_arg(const char *s) {
         return false;
     }
     for (const char *p = s; *p; p++) {
+#ifdef _WIN32
+        /* PowerShell treats U+2018..U+201B (UTF-8 E2 80 98..9B) as single quotes
+         * and ends a '...' string at them. The Windows scan command no longer
+         * interpolates these strings, so this is defense in depth. */
+        if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x80 &&
+            (unsigned char)p[2] >= 0x98 && (unsigned char)p[2] <= 0x9B) {
+            return false;
+        }
+#endif
         switch (*p) {
         case '\'':
         case '"':
@@ -17134,6 +17163,10 @@ typedef struct {
     char dir[CBM_SZ_512];
     char pattern_path[CBM_SZ_1K];
     char filelist_path[CBM_SZ_1K];
+    /* Windows only: the file_pattern and project root, handed to PowerShell as
+     * files instead of command-line text. Empty when not written. */
+    char file_pattern_path[CBM_SZ_1K];
+    char root_path_file[CBM_SZ_1K];
     FILE *filelist; /* held open for write_scoped_filelist; closed by the caller */
 } search_scratch_t;
 
@@ -17190,6 +17223,14 @@ static void search_scratch_close(search_scratch_t *scratch) {
     if (scratch->filelist_path[0] != '\0') {
         (void)cbm_unlink(scratch->filelist_path);
         scratch->filelist_path[0] = '\0';
+    }
+    if (scratch->file_pattern_path[0] != '\0') {
+        (void)cbm_unlink(scratch->file_pattern_path);
+        scratch->file_pattern_path[0] = '\0';
+    }
+    if (scratch->root_path_file[0] != '\0') {
+        (void)cbm_unlink(scratch->root_path_file);
+        scratch->root_path_file[0] = '\0';
     }
     if (scratch->dir[0] != '\0') {
         (void)cbm_rmdir(scratch->dir);
@@ -17573,6 +17614,8 @@ static bool search_scratch_open(search_scratch_t *scratch, const char *parent,
     scratch->dir[0] = '\0';
     scratch->pattern_path[0] = '\0';
     scratch->filelist_path[0] = '\0';
+    scratch->file_pattern_path[0] = '\0';
+    scratch->root_path_file[0] = '\0';
     scratch->filelist = NULL;
 
     int written = snprintf(scratch->dir, sizeof(scratch->dir), "%s/cbm-search-XXXXXX", parent);
@@ -17602,6 +17645,26 @@ static bool search_scratch_open(search_scratch_t *scratch, const char *parent,
     }
     return true;
 }
+
+#ifdef _WIN32
+/* Write `value` verbatim (no trailing newline) to a new exclusive file in the
+ * scratch directory, for the Windows scan command to read back. */
+static bool search_scratch_write_value(search_scratch_t *scratch, const char *basename,
+                                       const char *value, char *path_out, size_t path_sz) {
+    FILE *stream = search_scratch_file(scratch->dir, basename, path_out, path_sz);
+    if (!stream) {
+        return false;
+    }
+    size_t len = strlen(value);
+    bool ok = fwrite(value, SKIP_ONE, len, stream) == len;
+    ok = fclose(stream) == 0 && ok;
+    if (!ok) {
+        (void)cbm_unlink(path_out);
+        path_out[0] = '\0';
+    }
+    return ok;
+}
+#endif
 
 /* Compile a path filter regex. Returns true when *re holds the compiled filter.
  * An absent or empty filter compiles nothing and reports CBM_REG_OK in *rc; a
@@ -18000,8 +18063,26 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         search_scratch_close(&scratch);
     } else if (scan_ok) {
         char cmd[CBM_SZ_4K];
+        const char *file_pattern_file = NULL;
+        const char *root_file = NULL;
+#ifdef _WIN32
+        /* The command line never carries the file pattern or the project root
+         * (see cbm_search_code_build_grep_cmd). */
+        if (!search_scratch_write_value(&scratch, "root", root_path, scratch.root_path_file,
+                                        sizeof(scratch.root_path_file)) ||
+            (file_pattern &&
+             !search_scratch_write_value(&scratch, "fpat", file_pattern, scratch.file_pattern_path,
+                                         sizeof(scratch.file_pattern_path)))) {
+            free_search_results(sr, sr_count);
+            return search_code_scan_error(&scratch, NULL, has_path_filter, &path_regex, root_path,
+                                          pattern, project, file_pattern, MCP_SCAN_COMMAND_FAILURE,
+                                          "search failed: cannot create temp file");
+        }
+        root_file = scratch.root_path_file;
+        file_pattern_file = file_pattern ? scratch.file_pattern_path : NULL;
+#endif
         cbm_search_code_build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile,
-                                       filelist, root_path);
+                                       filelist, root_path, file_pattern_file, root_file);
 
         /* The scan runs under the supervised, deadline- and output-bounded
          * runner. Every cause other than success fails closed here, so a page

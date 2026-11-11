@@ -20,7 +20,9 @@
 | `src/foundation/limits.c` | `CBM_MAX_FILE_BYTES` 超出 `long` 範圍時回到 512 MiB 預設 | 溢位時用 `LONG_MAX` | Windows 的 `long` 為 32 位元，設定 3 GiB 反而變成 512 MiB（有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_index_resilience.c` | — | 新增 `CBM_MAX_FILE_BYTES` 溢位測試 | 對應 limits.c 修正 | 隨 limits.c 一起處理 |
 | `internal/cbm/ac.c` | `cbm_ac_build` 配置未檢查 | 任一配置失敗即釋放並回傳 NULL | 記憶體不足時 NULL 解參考（無自動測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/mcp/mcp.c` | 讀取片段時路徑緩衝配置未檢查 | 配置失敗回傳 NULL | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/mcp/mcp.c` | 讀取片段時路徑緩衝配置未檢查；Windows `search_code` 把 `file_pattern` 與專案根路徑內插進 PowerShell 命令列，驗證只擋 ASCII 引號 | 配置失敗回傳 NULL；Windows 命令改由暫存檔讀入這兩個值（`cbm_search_code_build_grep_cmd` 多兩個暫存檔參數），`validate_search_path_arg` 在 Windows 另拒 U+2018–U+201B | 配置未檢查同上；PowerShell 把 U+2018–U+201B 當單引號，含這些字元的 `file_pattern` 或專案根路徑能終止字串並讓後續文字當程式執行（獨立覆核發現，有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/mcp/mcp_internal.h` | — | `cbm_search_code_build_grep_cmd` 宣告多兩個暫存檔參數 | 對應 mcp.c 修正 | 隨 mcp.c 一起處理 |
+| `tests/test_mcp.c` | — | 新增 Windows 拒絕 U+2018–U+201B 與命令列不含使用者字串的測試；既有的三個 PowerShell 命令測試改用新簽名 | 對應 mcp.c 修正 | 隨 mcp.c 一起處理 |
 | `src/pipeline/pass_githistory.c` | 共同變更配對的配置未檢查 | 配置失敗略過該配對 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/pipeline/pipeline.c` | `create_folder_chain` 的 `strdup` 未檢查 | 失敗即返回 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/pipeline/registry.c` | 後綴查詢的配置未檢查 | 失敗回傳 0 筆 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |

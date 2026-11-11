@@ -14335,20 +14335,26 @@ TEST(search_code_file_pattern_prefilter_boundaries) {
 TEST(search_code_windows_scope_prefilter_removes_pipeline_filter) {
 #ifdef _WIN32
     char command[CBM_SZ_4K];
+    /* The pattern is read from its scratch file, never spelled in the command. */
     cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*.go", "C:/tmp/pattern",
-                                   "C:/tmp/filelist", "C:/tmp/root");
+                                   "C:/tmp/filelist", "C:/tmp/root", "C:/tmp/fpat",
+                                   "C:/tmp/rootfile");
 
     const char *content_scan = strstr(command, "ForEach-Object { Select-String");
-    const char *postfilter = strstr(command, "Where-Object { $_.Path -like '**.go' }");
+    const char *postfilter = strstr(command, "Where-Object { $_.Path -like ('*' + $fp) }");
     ASSERT_NULL(strstr(command, "Where-Object { $_ -like '*.go' }"));
     ASSERT_NOT_NULL(content_scan);
     ASSERT_NOT_NULL(postfilter);
     ASSERT_TRUE(content_scan < postfilter);
+    ASSERT_NOT_NULL(strstr(command, "-LiteralPath 'C:/tmp/fpat'"));
+    ASSERT_NULL(strstr(command, "*.go"));
 
     cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*handler*.go",
-                                   "C:/tmp/pattern", "C:/tmp/filelist", "C:/tmp/root");
+                                   "C:/tmp/pattern", "C:/tmp/filelist", "C:/tmp/root",
+                                   "C:/tmp/fpat", "C:/tmp/rootfile");
     ASSERT_NULL(strstr(command, "Where-Object { $_ -like '*handler*.go' }"));
-    ASSERT_NOT_NULL(strstr(command, "Where-Object { $_.Path -like '**handler*.go' }"));
+    ASSERT_NOT_NULL(strstr(command, "Where-Object { $_.Path -like ('*' + $fp) }"));
+    ASSERT_NULL(strstr(command, "handler"));
     PASS();
 #else
     SKIP_PLATFORM("PowerShell prefilter runs on Windows");
@@ -15069,7 +15075,7 @@ TEST(search_code_windows_scan_pins_utf8_output) {
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         cbm_search_code_build_grep_cmd(command, sizeof(command), false, cases[i].scoped,
                                        cases[i].file_pattern, "C:/tmp/pattern", "C:/tmp/filelist",
-                                       "C:/tmp/root");
+                                       "C:/tmp/root", "C:/tmp/fpat", "C:/tmp/rootfile");
         ASSERT_TRUE(strncmp(command, prelude, sizeof(prelude) - 1) == 0);
     }
     PASS();
@@ -27420,6 +27426,91 @@ TEST(search_code_rejects_quote_in_file_pattern) {
     PASS();
 }
 
+/* F1 (independent review): PowerShell ends a single-quoted string at U+2018..U+201B
+ * as well as at ASCII ', so a file_pattern or project root carrying one of them
+ * escapes the quoting of the Windows scan command. Marker bytes only: these
+ * strings are never executed, the test asserts they are rejected up front. */
+TEST(search_code_windows_rejects_unicode_single_quotes) {
+#ifdef _WIN32
+    static const char *const quotes[] = {"\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9A",
+                                         "\xE2\x80\x9B"};
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    for (size_t q = 0; q < sizeof(quotes) / sizeof(quotes[0]); q++) {
+        char req[256];
+        snprintf(req, sizeof(req),
+                 "{\"project\":\"test-project\",\"pattern\":\"HandleRequest\","
+                 "\"file_pattern\":\"*.go%sZZMARK\",\"format\":\"json\"}",
+                 quotes[q]);
+        char *response = cbm_mcp_handle_tool(srv, "search_code", req);
+        ASSERT_NOT_NULL(response);
+        char *inner = extract_text_content(response);
+        free(response);
+        ASSERT_NOT_NULL(inner);
+        ASSERT_NOT_NULL(strstr(inner, "path or file_pattern contains invalid characters"));
+        free(inner);
+    }
+
+    /* The same characters inside the stored project root. */
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    for (size_t q = 0; q < sizeof(quotes) / sizeof(quotes[0]); q++) {
+        char root[512];
+        snprintf(root, sizeof(root), "%s/project%sZZROOT", tmp, quotes[q]);
+        ASSERT_EQ(cbm_store_upsert_project(st, "test-project", root), CBM_STORE_OK);
+        char *response = cbm_mcp_handle_tool(
+            srv, "search_code",
+            "{\"project\":\"test-project\",\"pattern\":\"HandleRequest\",\"format\":\"json\"}");
+        ASSERT_NOT_NULL(response);
+        char *inner = extract_text_content(response);
+        free(response);
+        ASSERT_NOT_NULL(inner);
+        ASSERT_NOT_NULL(strstr(inner, "path or file_pattern contains invalid characters"));
+        free(inner);
+    }
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+#else
+    SKIP_PLATFORM("PowerShell quoting rules apply on Windows");
+#endif
+}
+
+/* F1 defense in depth: whatever validation lets through, the Windows command
+ * line must not carry the user's file_pattern or root path at all; both are read
+ * from scratch files by the PowerShell side. */
+TEST(search_code_windows_command_never_embeds_user_strings) {
+#ifdef _WIN32
+    static const char file_pattern[] = "*x*\xE2\x80\x99ZZPATTERNMARK";
+    static const char root_path[] = "C:/r\xE2\x80\x99ZZROOTMARK";
+    char command[CBM_SZ_4K];
+    for (int scoped = 0; scoped <= 1; scoped++) {
+        for (int with_pattern = 0; with_pattern <= 1; with_pattern++) {
+            cbm_search_code_build_grep_cmd(command, sizeof(command), false, scoped != 0,
+                                           with_pattern ? file_pattern : NULL, "C:/tmp/pattern",
+                                           "C:/tmp/filelist", root_path, "C:/tmp/fpat",
+                                           "C:/tmp/rootfile");
+            ASSERT_NULL(strstr(command, "ZZPATTERNMARK"));
+            ASSERT_NULL(strstr(command, "ZZROOTMARK"));
+            ASSERT_NULL(strstr(command, "\xE2\x80\x99"));
+            ASSERT_NOT_NULL(strstr(command, "powershell -Command"));
+        }
+    }
+    /* A caller that supplied no scratch file for a value it asked for gets a
+     * command that fails the scan, never one built from the raw string. */
+    cbm_search_code_build_grep_cmd(command, sizeof(command), false, false, file_pattern,
+                                   "C:/tmp/pattern", "C:/tmp/filelist", root_path, NULL, NULL);
+    ASSERT_NULL(strstr(command, "ZZPATTERNMARK"));
+    ASSERT_NULL(strstr(command, "ZZROOTMARK"));
+    ASSERT_NULL(strstr(command, "powershell"));
+    PASS();
+#else
+    SKIP_PLATFORM("PowerShell command builder runs on Windows");
+#endif
+}
+
 TEST(tool_check_index_coverage_parse_gap_precedes_unresolved_calls) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
@@ -28490,6 +28581,8 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_limit_above_ceiling_is_capped);
     RUN_TEST(tool_trace_cursor_truncated_after_leg_is_rejected);
     RUN_TEST(search_code_rejects_quote_in_file_pattern);
+    RUN_TEST(search_code_windows_rejects_unicode_single_quotes);
+    RUN_TEST(search_code_windows_command_never_embeds_user_strings);
 
     /* search_code: every match resolves inside the project root */
     RUN_TEST(search_code_matches_stay_inside_project_root);

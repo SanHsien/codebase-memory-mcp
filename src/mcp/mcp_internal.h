@@ -135,10 +135,17 @@ bool cbm_search_code_windows_path_matches_prefilter(const char *path, const char
 
 /* Internal command builder exposed so tests can pin the PowerShell pipeline
  * ordering without
- * starting an external shell. */
+ * starting an external shell.
+ *
+ * Windows: file_pattern is only tested for presence and root_path is ignored.
+ * Their values reach PowerShell through file_pattern_file and root_file, scratch
+ * files the caller wrote them to, so no user-supplied string is ever spliced
+ * into the command line. POSIX ignores the two file arguments and quotes the
+ * validated strings as before. */
 void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
                                     const char *file_pattern, const char *tmpfile,
-                                    const char *filelist, const char *root_path);
+                                    const char *filelist, const char *root_path,
+                                    const char *file_pattern_file, const char *root_file);
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* Reject opening one changed file while detect_changes fingerprints its live
  * snapshot. This makes otherwise platform-specific permission/read races
