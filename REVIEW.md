@@ -147,6 +147,19 @@
 
 評估後不改：YAML 過期鎖回收在「檢查鎖的時間」與 `RemoveDirectoryW` 之間有競態，另一個程序若恰好在這段時間回收並重建鎖，會被刪掉。需要同時有崩潰殘留的鎖與兩個在微秒內並行的安裝程式，無法實際重現。
 
+## 2026-11-11 獨立覆核（fresh-context 覆核者）
+
+| 項目 | 結論 | 修復 commit（2026-11-11） |
+| --- | --- | --- |
+| F1 Windows `search_code` 命令列內插 `file_pattern`／專案根路徑，U+2018–U+201B 終止 PowerShell 字串 | 屬實，已修（改由暫存檔傳入、Windows 拒絕這些字元） | `11838f43` |
+| F2 Rust `src/bin`、`tests`、`examples`、`benches` 併入 `src/`／`tests/` 模組樹（11-10 同步引入，上游 `6d34ca15` 仍同） | 屬實，已修 | `bad00094` |
+| F3 Rust `use` 樹遞迴無深度上限 | 屬實（ASan stack-overflow），已修，上限 256 | `0b6c6021` |
+| F4 內嵌 `mod` 的 `use` 失去邊 | 測試確認屬實，已修 | `94c92bbb` |
+| F5 `search_scratch_t` 註解稱從不以名稱重開 | 屬實但無法改成傳 fd（find／sort 是獨立程序），改註解說明例外與安全理由 | `3fb4311c` |
+| F6 `windows_volume_present` 遇 `/c/...` 回 true | 屬實，已修 | `2ede8a5a` |
+| F7 目錄項名稱截斷可能切斷 UTF-8 | 屬實，已修 | `31c11b1a` |
+| F8 hook 解除後留空殼、F9 `ACCESS_DENIED` 重試 | 只記錄，未重現未修；列在 `ROADMAP.md` 中期表 | — |
+
 ## 未結
 
 - **`detect_changes_scope_tests_answers_test_impact`**（2026-10-30 查明，測試由 MSYS 環境觸發，背後是上游產品的已知限制；未動產品邏輯）：fixture 的暫存 repo 建在 `cbm_tmpdir()`，MSYS2 profile 預設 `TMP`／`TEMP=/tmp`，MSYS git 回 `/tmp/...`，`gf_native_metadata_path` 只映射 `/c/...` 形式而拒絕其餘，測試得到 `run_all`＋`GIT_UNAVAILABLE`（診斷「Git metadata path is not absolute」）。同機同 binary，暫存根設為使用者目錄下受保護路徑後 `mcp` suite 373 passed、0 failed；不設則 372 passed、1 failed，可重現。條件寫在 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。使用者以 MSYS git 分析 MSYS 根目錄下的 repo（`/home`、`/tmp` 等）同樣得到 `run_all`＋`GIT_UNAVAILABLE`；這是 fail-closed，不會給假的無影響結論。是否改用 mount 轉換由維護者決定（上游行為，動它要登記分岔），見 ROADMAP 中期。

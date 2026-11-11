@@ -17,4 +17,5 @@ English: [CHANGELOG.en.md](CHANGELOG.en.md)
 - 修正 Windows：repo 內名為 `nul` 的檔案讓每次索引都中止（上游 issue #2646）。
 - 同步上游到 `a7158ac`（v0.12.1）與 `10ab613`（2026-10-24，共 294 個提交），新增 PR／issue 的增量分流紀錄；watcher UTF-8 路徑與 Rust 泛型 impl 改用上游版本；TS LSP 走訪上限減半（512 層在 ASan 下用完 8 MiB 堆疊）。
 - 刪除 `GEMINI.md`，內容併入 `AGENTS.md`。
+- 獨立覆核（2026-11-11）F1–F7 修正並補回歸測試：Windows `search_code` 命令列不再內插 `file_pattern` 與專案根路徑（拒絕 U+2018–U+201B）、Rust 獨立 crate 目標目錄（`src/bin`、`tests`、`examples`、`benches`）的 `crate::` 解析、Rust `use` 樹深度上限、Rust 內嵌 `mod` 的 `use`、watcher 非 `X:` 形式根目錄不修剪、目錄項名稱 UTF-8 截斷；F8、F9 僅記錄於 `ROADMAP.md`。
 - 同步上游到 `edfb824f`（2026-11-10，增量 85 個提交、15 個併入的 PR），新增 PR／issue 的增量分流紀錄；`nul` 檔案的走訪修正改用上游版本並刪除對應分岔。
