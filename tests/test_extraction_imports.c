@@ -1123,6 +1123,37 @@ TEST(import_count_rust_exact) {
     PASS();
 }
 
+/* F4 (independent review): `use` declarations inside an inline `mod name { ... }` were never
+ * visited, so a file that keeps its imports in a mod body (a `mod tests` is the common case)
+ * lost every one of them and the IMPORTS edges with them. */
+TEST(rust_use_inside_inline_mod_is_extracted) {
+    CBMFileResult *r = do_extract(
+        "use std::fs;\n"
+        "mod outer {\n"
+        "    use crate::config::Config;\n"
+        "    pub mod inner {\n"
+        "        use super::helper::run;\n"
+        "    }\n"
+        "}\n"
+        "fn main() {}\n",
+        CBM_LANG_RUST, "a.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    bool fs = false, config = false, run = false;
+    for (int i = 0; i < r->imports.count; i++) {
+        const char *mp = r->imports.items[i].module_path;
+        fs = fs || (mp && strcmp(mp, "std::fs") == 0);
+        config = config || (mp && strcmp(mp, "crate::config::Config") == 0);
+        run = run || (mp && strcmp(mp, "super::helper::run") == 0);
+    }
+    ASSERT_TRUE(fs);
+    ASSERT_TRUE(config);
+    ASSERT_TRUE(run);
+    ASSERT_EQ(r->imports.count, 3);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(import_count_java_exact) {
     /* 2 import_declarations */
     CBMFileResult *r = do_extract(
@@ -1338,6 +1369,7 @@ SUITE(extraction_imports) {
     RUN_TEST(import_count_python_exact);
     RUN_TEST(import_count_ts_exact);
     RUN_TEST(import_count_rust_exact);
+    RUN_TEST(rust_use_inside_inline_mod_is_extracted);
     RUN_TEST(import_count_java_exact);
     RUN_TEST(import_count_kotlin_exact);
     RUN_TEST(import_count_csharp_exact);

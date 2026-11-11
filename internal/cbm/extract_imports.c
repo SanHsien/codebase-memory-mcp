@@ -2028,21 +2028,31 @@ static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix
     rust_import_push(ctx, full, NULL);
 }
 
-static void parse_rust_imports(CBMExtractCtx *ctx) {
-    TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
+/* The `use` declarations among the children of parent: the file's top level, or the body of
+ * an inline `mod name { ... }`, whose imports are as real as the top level's. */
+static void parse_rust_imports_in(CBMExtractCtx *ctx, TSNode parent, int depth) {
+    TSTreeCursor cursor = ts_tree_cursor_new(parent);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
         ts_tree_cursor_delete(&cursor);
         return;
     }
     do {
         TSNode node = ts_tree_cursor_current_node(&cursor);
-        if (strcmp(ts_node_type(node), "use_declaration") != 0) {
-            continue;
+        const char *kind = ts_node_type(node);
+        if (strcmp(kind, "use_declaration") == 0) {
+            rust_import_walk(ctx, rust_import_field(node, "argument"), "", 0);
+        } else if (strcmp(kind, "mod_item") == 0 && depth < RUST_IMPORT_DEPTH_LIMIT) {
+            TSNode body = rust_import_field(node, "body");
+            if (!ts_node_is_null(body)) {
+                parse_rust_imports_in(ctx, body, depth + SKIP_ONE);
+            }
         }
-
-        rust_import_walk(ctx, rust_import_field(node, "argument"), "", 0);
     } while (ts_tree_cursor_goto_next_sibling(&cursor));
     ts_tree_cursor_delete(&cursor);
+}
+
+static void parse_rust_imports(CBMExtractCtx *ctx) {
+    parse_rust_imports_in(ctx, ctx->root, 0);
 }
 
 // --- C/C++ imports ---
