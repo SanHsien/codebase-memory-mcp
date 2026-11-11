@@ -1976,8 +1976,13 @@ static void rust_import_push(CBMExtractCtx *ctx, const char *full, const char *a
     cbm_imports_push(&ctx->result->imports, a, imp);
 }
 
-static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix) {
-    if (ts_node_is_null(node)) {
+/* Nesting limit for `use` trees and inline `mod` bodies: the walks recurse once per
+ * level, and a hostile `use a::{a::{...}}` otherwise overflows the stack. Matches the
+ * 256-level cap the C# and C LSP walkers use; real code nests a handful of levels. */
+enum { RUST_IMPORT_DEPTH_LIMIT = 256 };
+
+static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix, int depth) {
+    if (ts_node_is_null(node) || depth > RUST_IMPORT_DEPTH_LIMIT) {
         return;
     }
 
@@ -1986,14 +1991,14 @@ static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix
     if (strcmp(kind, "use_list") == 0) {
         uint32_t count = ts_node_named_child_count(node);
         for (uint32_t i = 0; i < count; i++) {
-            rust_import_walk(ctx, ts_node_named_child(node, i), prefix);
+            rust_import_walk(ctx, ts_node_named_child(node, i), prefix, depth + SKIP_ONE);
         }
         return;
     }
     if (strcmp(kind, "scoped_use_list") == 0) {
         char *path = rust_import_node_text_compact(a, rust_import_field(node, "path"), ctx->source);
         char *next_prefix = rust_import_join(a, prefix, path);
-        rust_import_walk(ctx, rust_import_field(node, "list"), next_prefix);
+        rust_import_walk(ctx, rust_import_field(node, "list"), next_prefix, depth + SKIP_ONE);
         return;
     }
     if (strcmp(kind, "use_as_clause") == 0) {
@@ -2035,7 +2040,7 @@ static void parse_rust_imports(CBMExtractCtx *ctx) {
             continue;
         }
 
-        rust_import_walk(ctx, rust_import_field(node, "argument"), "");
+        rust_import_walk(ctx, rust_import_field(node, "argument"), "", 0);
     } while (ts_tree_cursor_goto_next_sibling(&cursor));
     ts_tree_cursor_delete(&cursor);
 }

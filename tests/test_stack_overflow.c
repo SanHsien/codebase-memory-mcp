@@ -244,6 +244,52 @@ TEST(ts_imports_exceed_512) {
  * A deep call chain can overflow the stack even with fewer total nodes.
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* F3 (independent review): rust_import_walk recursed once per `use` list nesting level
+ * with no bound, so a hostile `use {{{...}}}` tens of thousands of levels deep overflowed
+ * the stack (ASan stack-overflow at 20000 levels before the fix). The walk is now limited to
+ * 256 levels: a declaration nested deeper is dropped, nesting within the limit and the rest
+ * of the file are extracted as before. Braces only, and a modest depth: unrelated passes
+ * are slow on tens of thousands of levels and would hide what this test pins. */
+static bool rust_use_nest_has_import(int depth, const char *want_module) {
+    size_t buf_sz = 256 + (size_t)depth * 2;
+    char *src = malloc(buf_sz);
+    if (!src) {
+        return false;
+    }
+    char *p = src;
+    p += snprintf(p, buf_sz, "use ");
+    for (int i = 0; i < depth; i++) {
+        p += snprintf(p, buf_sz - (size_t)(p - src), "{");
+    }
+    p += snprintf(p, buf_sz - (size_t)(p - src), "leaf");
+    for (int i = 0; i < depth; i++) {
+        p += snprintf(p, buf_sz - (size_t)(p - src), "}");
+    }
+    snprintf(p, buf_sz - (size_t)(p - src), ";\nuse std::fmt;\n");
+
+    CBMFileResult *r = extract(src, CBM_LANG_RUST, "test", "deep_use.rs");
+    bool found = false;
+    if (r) {
+        for (int i = 0; i < r->imports.count; i++) {
+            const char *mp = r->imports.items[i].module_path;
+            found = found || (mp && strcmp(mp, want_module) == 0);
+        }
+        cbm_free_result(r);
+    }
+    free(src);
+    return found;
+}
+
+TEST(rust_deeply_nested_use_tree) {
+    /* The rest of the file survives either way. */
+    ASSERT_TRUE(rust_use_nest_has_import(200, "std::fmt"));
+    ASSERT_TRUE(rust_use_nest_has_import(300, "std::fmt"));
+    /* Within the limit the nested import is extracted; beyond it, it is dropped. */
+    ASSERT_TRUE(rust_use_nest_has_import(200, "leaf"));
+    ASSERT_FALSE(rust_use_nest_has_import(300, "leaf"));
+    PASS();
+}
+
 TEST(js_deeply_nested_calls) {
     const int DEPTH = 200;
     /* Build: outermost( level_0( level_1( ... level_199() ... ))) */
@@ -1437,6 +1483,7 @@ SUITE(stack_overflow_c) {
     RUN_TEST(express_routes_exceed_512);
     RUN_TEST(ts_imports_exceed_512);
     RUN_TEST(js_deeply_nested_calls);
+    RUN_TEST(rust_deeply_nested_use_tree);
     RUN_TEST(yaml_vars_exceed_256);
     RUN_TEST(clojure_deep_nested_calls_no_hang);
     RUN_TEST(js_long_member_chain_no_hang);
