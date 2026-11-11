@@ -27,7 +27,7 @@
 | `tests/test_mcp.c` | — | 新增 Windows 拒絕 U+2018–U+201B 與命令列不含使用者字串的測試；既有的三個 PowerShell 命令測試改用新簽名 | 對應 mcp.c 修正 | 隨 mcp.c 一起處理 |
 | `src/pipeline/pass_githistory.c` | 共同變更配對的配置未檢查 | 配置失敗略過該配對 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/pipeline/pipeline.c` | `create_folder_chain` 的 `strdup` 未檢查 | 失敗即返回 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/pipeline/registry.c` | 後綴查詢的配置未檢查 | 失敗回傳 0 筆 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/pipeline/registry.c` | 後綴查詢的配置未檢查（上游 `bbd09579` 改用 `cbm_alloc`，仍未檢查回傳值） | 失敗回傳 0 筆；配置用上游的 `cbm_alloc` | 同上；`cbm_alloc` 記憶體不足時同樣回傳 NULL，2026-11-12 同步時保留本檢查並與上游的 tracked allocator 疊用 | 上游若自己加上 NULL 檢查，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/pipeline/pass_route_nodes.c` | `"args":[` 切片少 1 位元組；SvelteKit 的 layout load 與 page load 共用同一 Route；路由根取第一個 `/routes/`；gRPC service 名稱未跳脫 | 切片長度改為 8；layout load 用 `LAYOUT_LOAD`；路由根優先取 `src/routes/`；service 名稱經 `cbm_json_escape`（handler 名稱跳脫上游已在 `sveltekit_handles_props` 修好，2026-10-27 同步改用上游版本；上游緩衝區 512 位元組，跳脫後超過約 510 位元組的 handler QN 會被截短但 JSON 仍有效） | 平行路徑（50 檔以上）每條 DATA_FLOWS 都退回成 `{via, edge_type}`，`route` 與 `caller_args` 全部遺失；layout 的 load 被當成 page 的 handler；monorepo 路由變成 `/app/src/routes/x`（皆有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_edge_structural.c` | — | 新增 DATA_FLOWS 屬性、SvelteKit 兩個路由測試 | 對應 pass_route_nodes.c 修正 | 隨 pass_route_nodes.c 一起處理 |
 | `internal/cbm/extract_dbt.c` | Jinja 樹的 ref 收集與最右字串搜尋為無上限遞迴 | 改用 `TSNodeStack` 迭代 | 深巢狀 Jinja 使 SQL 抽取 stack overflow（ASan 實測） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |

@@ -19,3 +19,4 @@ English: [CHANGELOG.en.md](CHANGELOG.en.md)
 - 刪除 `GEMINI.md`，內容併入 `AGENTS.md`。
 - 獨立覆核（2026-11-11）F1–F7 修正並補回歸測試：Windows `search_code` 命令列不再內插 `file_pattern` 與專案根路徑（拒絕 U+2018–U+201B）、Rust 獨立 crate 目標目錄（`src/bin`、`tests`、`examples`、`benches`）的 `crate::` 解析、Rust `use` 樹深度上限、Rust 內嵌 `mod` 的 `use`、watcher 非 `X:` 形式根目錄不修剪、目錄項名稱 UTF-8 截斷；F8、F9 僅記錄於 `ROADMAP.md`。
 - 同步上游到 `edfb824f`（2026-11-10，增量 85 個提交、15 個併入的 PR），新增 PR／issue 的增量分流紀錄；`nul` 檔案的走訪修正改用上游版本並刪除對應分岔。
+- 同步上游到 `f5d57465`（2026-11-12，增量 123 個提交：87 個非 merge、36 個併入的 PR），新增 PR／issue 的增量分流紀錄；VB.NET 文法（上游 PR 2948）、Swift 呼叫綁定與 C# 接收者修正併入；`registry.c` 後綴查詢改用上游的 `cbm_alloc`，NULL 檢查保留。

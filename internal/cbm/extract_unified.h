@@ -210,6 +210,14 @@ typedef struct {
     /* Allocation failure: stop tracking and answer "not bound" forever after,
      * which can only cost a suppression, never a true edge. */
     bool py_param_tracking_failed;
+    /* #1128: the factory the AMD define/require call visited last passes (its
+     * exact span; end 0 = none) and that call's dependency array. The walk
+     * reaches the factory right after the array, and when it opens the
+     * factory's frame the dependency parameters are bound into the parameter
+     * map above, which a JS/TS walk uses for nothing else. */
+    uint32_t amd_factory_start_byte;
+    uint32_t amd_factory_end_byte;
+    TSNode amd_dependencies;
 
     /* Ancestors of the node being classified, pushed and popped by the walk
      * (extract_usages.c). The occurrence classifiers read it instead of
@@ -240,6 +248,12 @@ static inline uint32_t cbm_walk_active_lexical_scope_id(const WalkState *state) 
  * currently open on the walk stack? O(1). Answers false on any failure, so a
  * caller can only ever lose a suppression, never a true edge. */
 bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name);
+
+/* #1128: is identifier `ident` a parameter that the factory of an enclosing AMD
+ * define([...], fn) / require([...], fn) binds to a dependency module? JS/TS
+ * walks only. O(1); false on any failure, so a caller can only lose a
+ * suppression, never a true edge. */
+bool cbm_walk_amd_dependency_binds(CBMExtractCtx *ctx, const WalkState *state, TSNode ident);
 
 // Per-node handler prototypes. Each is called once per node during the
 // unified cursor walk, replacing the old recursive walk_* functions.
