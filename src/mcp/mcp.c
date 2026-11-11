@@ -17153,8 +17153,17 @@ static bool validate_search_args(const char *root_path, const char *file_pattern
  * an explicit owner-only DACL on Windows) under an unguessable XXXXXX suffix,
  * and each file is created by cbm_mkstemp — O_CREAT|O_EXCL at mode 0600, so the
  * create fails rather than following anything already at the name. Every write
- * goes through the descriptor cbm_mkstemp returned; neither path is ever
- * reopened by name.
+ * goes through the descriptor cbm_mkstemp returned.
+ *
+ * Exception, reviewed (independent review F5): later consumers DO reopen the
+ * file list by name — the in-process scanner (search_scan_in_process), and on
+ * POSIX the find and sort argv stages of mcp_run_search_scan_argv, which are
+ * separate processes and can only be handed a path (find's stdout capture and
+ * `sort -o` open it by name). That is safe because the name lives inside the
+ * private directory: nobody but the owner can add, replace or redirect an entry
+ * there between the exclusive create and the last use, and the directory name
+ * itself is unguessable and created fresh by cbm_mkdtemp. The same holds for the
+ * Windows-only file_pattern and root files read back by PowerShell.
  *
  * Sizing: cbm_mkdtemp copies its expanded result back into `dir`, and its own
  * internal buffer is CBM_SZ_512, so `dir` must be at least that big to receive
