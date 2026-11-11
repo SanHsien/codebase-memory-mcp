@@ -48,8 +48,9 @@
 | 2945 | Python：`Depends(fn)` 的 CALLS 邊在專案變大後消失（~14k 行） | OPEN | 觀察；有 `parsing/quality`、`windows` 標籤。尚無上游修正，無本地重現。觸發：上游 PR，或本機重現 |
 | 2949 | Perl：跨檔方法解析與 accessor 型別（Moose、Mojo::Base） | OPEN | 延後；`enhancement` 標籤，功能性新增，本 fork 不急用。觸發：上游 PR |
 | 2955 | Daemon 快取目錄不符錯誤訊息顯示 SHA-256 指紋而非實際路徑 | OPEN | 延後；只影響錯誤訊息文字，無上游修正。觸發：上游 PR，或本機實際遇到 |
+| 2961 | GDScript：vendored tree-sitter-gdscript 落後上游，合法的 Godot 4 程式回報 `parse_partial` | OPEN | 延後；文法 vendored 更新，本 fork 無 GDScript 分岔，超出本輪範圍。觸發：上游併入 vendored 文法更新，或本機以 Godot 專案重現。注意：本 issue 在第一次 `gh issue list` 時未出現，於寫入 commit 前的最後一次 `check_upstream_updates.py --strict` 才被列出，所以水位在後續 commit 才推進到 2961 |
 
-PR 2944、2953、2954、2956、2958 不在 `gh pr list`、`gh issue list`（各取最新 60 筆，`--state all`）的結果中，本次未查證其原因。
+PR 2944、2953、2954、2956、2958 不在 `gh pr list`、`gh issue list`（各取最新 60 筆，`--state all`）的結果中，本次未查證其原因。重新執行 `check_upstream_updates.py --strict` 時，PR 清單中 2959 以上沒有新項目，issue 清單中 2956 至 2960 沒有 issue，2961 是唯一新增項。
 
 ## 驗證（2026-11-12，Windows 11、MSYS2 CLANG64、clang）
 
