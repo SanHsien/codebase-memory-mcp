@@ -13399,6 +13399,80 @@ TEST(pipeline_rust_workspace_relative_import_stays_in_crate_parallel) {
     return rust_workspace_relative_import_case(52);
 }
 
+/* Every .rs file directly under src/bin, tests, examples and benches (and every
+ * <name>/main.rs-style subdirectory of them) is a crate root of its own, so its
+ * `crate::` and `self::` name items in that crate, not in the package's library
+ * under src/ or in one shared tests/ module tree. Here lib.rs and the src/bin
+ * binary both have a `util` module with a `helper`: the binary's `crate::util`
+ * must bind src/bin/util.rs, never the library's src/util.rs. pad_files > 0
+ * forces the parallel resolver. */
+static int rust_target_crate_roots_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_targets_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"pk\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "src/lib.rs", "pub mod util;\n");
+    write_temp_file(tmp, "src/util.rs", "pub fn helper() -> u32 {\n    1\n}\n");
+    write_temp_file(tmp, "src/bin/tool.rs",
+                    "mod util;\nuse crate::util::helper;\n\nfn main() {\n    let _ = helper();\n}\n");
+    write_temp_file(tmp, "src/bin/util.rs", "pub fn helper() -> u32 {\n    2\n}\n");
+    write_temp_file(tmp, "src/bin/multi/main.rs",
+                    "mod parts;\nuse crate::parts::build;\n\nfn main() {\n    let _ = build();\n}\n");
+    write_temp_file(tmp, "src/bin/multi/parts.rs", "pub fn build() -> u32 {\n    3\n}\n");
+    write_temp_file(tmp, "tests/integration.rs",
+                    "mod fixtures;\nuse self::fixtures::prepare;\n\n#[test]\nfn works() {\n"
+                    "    let _ = prepare();\n}\n");
+    write_temp_file(tmp, "tests/fixtures.rs", "pub fn prepare() -> u32 {\n    4\n}\n");
+    write_temp_file(tmp, "examples/demo.rs",
+                    "mod support;\nuse self::support::boot;\n\nfn main() {\n    let _ = boot();\n}\n");
+    write_temp_file(tmp, "examples/support.rs", "pub fn boot() -> u32 {\n    5\n}\n");
+    write_temp_file(tmp, "benches/speed.rs",
+                    "mod harness;\nuse self::harness::measure;\n\nfn main() {\n"
+                    "    let _ = measure();\n}\n");
+    write_temp_file(tmp, "benches/harness.rs", "pub fn measure() -> u32 {\n    6\n}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_targets.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    /* src/bin/tool.rs is its own crate: crate::util is src/bin/util.rs. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, "src/bin/tool.rs", "helper",
+                                          "src/bin/util.rs"),
+              1);
+    ASSERT_EQ(rust_import_into_file_count(s, project, "src/bin/tool.rs", "helper", "src/util.rs"),
+              0);
+    /* src/bin/<name>/main.rs roots its own module tree under that directory. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, "src/bin/multi/main.rs", "build",
+                                          "src/bin/multi/parts.rs"),
+              1);
+    /* tests/, examples/ and benches/: each file is a crate root, so `self::` is
+     * the crate root, not a module named after the file. */
+    ASSERT_EQ(rust_import_into_file_count(s, project, "tests/integration.rs", "prepare",
+                                          "tests/fixtures.rs"),
+              1);
+    ASSERT_EQ(rust_import_into_file_count(s, project, "examples/demo.rs", "boot",
+                                          "examples/support.rs"),
+              1);
+    ASSERT_EQ(rust_import_into_file_count(s, project, "benches/speed.rs", "measure",
+                                          "benches/harness.rs"),
+              1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_rust_target_dirs_are_their_own_crate_roots) {
+    return rust_target_crate_roots_case(0);
+}
+
+TEST(pipeline_rust_target_dirs_are_their_own_crate_roots_parallel) {
+    return rust_target_crate_roots_case(52);
+}
+
 static int count_nodes_named(cbm_store_t *s, const char *project, const char *name);
 
 /* Fixture for the #1942 bare-reference-vs-Field probes: a Go struct field
@@ -32289,6 +32363,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_rust_workspace_relative_import_stays_in_crate);
     RUN_TEST(pipeline_rust_workspace_relative_import_stays_in_crate_parallel);
+    RUN_TEST(pipeline_rust_target_dirs_are_their_own_crate_roots);
+    RUN_TEST(pipeline_rust_target_dirs_are_their_own_crate_roots_parallel);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field);

@@ -21,6 +21,8 @@
 | `tests/test_index_resilience.c` | — | 新增 `CBM_MAX_FILE_BYTES` 溢位測試 | 對應 limits.c 修正 | 隨 limits.c 一起處理 |
 | `internal/cbm/ac.c` | `cbm_ac_build` 配置未檢查 | 任一配置失敗即釋放並回傳 NULL | 記憶體不足時 NULL 解參考（無自動測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/mcp/mcp.c` | 讀取片段時路徑緩衝配置未檢查；Windows `search_code` 把 `file_pattern` 與專案根路徑內插進 PowerShell 命令列，驗證只擋 ASCII 引號 | 配置失敗回傳 NULL；Windows 命令改由暫存檔讀入這兩個值（`cbm_search_code_build_grep_cmd` 多兩個暫存檔參數），`validate_search_path_arg` 在 Windows 另拒 U+2018–U+201B | 配置未檢查同上；PowerShell 把 U+2018–U+201B 當單引號，含這些字元的 `file_pattern` 或專案根路徑能終止字串並讓後續文字當程式執行（獨立覆核發現，有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/pipeline/pass_pkgmap.c` | Rust 的 `rust_module_root` 把 `src/bin`、`tests`、`examples`、`benches` 下的獨立 crate 併入 `src/` 或 `tests/` 模組樹 | 這四個目錄直接底下的 `.rs` 檔各自是 crate root（`<目錄>/<名稱>/` 底下的檔案以該子目錄為根） | `src/bin/x.rs` 的 `crate::util` 綁到函式庫的 `src/util.rs`，`tests/x.rs` 的 `self::` 被當成名為 `x` 的模組（獨立覆核發現，有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `tests/test_pipeline.c` | — | 新增 Rust 目標目錄 crate root 測試（循序與平行） | 對應 pass_pkgmap.c 修正 | 隨 pass_pkgmap.c 一起處理 |
 | `src/mcp/mcp_internal.h` | — | `cbm_search_code_build_grep_cmd` 宣告多兩個暫存檔參數 | 對應 mcp.c 修正 | 隨 mcp.c 一起處理 |
 | `tests/test_mcp.c` | — | 新增 Windows 拒絕 U+2018–U+201B 與命令列不含使用者字串的測試；既有的三個 PowerShell 命令測試改用新簽名 | 對應 mcp.c 修正 | 隨 mcp.c 一起處理 |
 | `src/pipeline/pass_githistory.c` | 共同變更配對的配置未檢查 | 配置失敗略過該配對 | 同上 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |

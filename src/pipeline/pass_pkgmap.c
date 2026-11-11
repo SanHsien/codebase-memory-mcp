@@ -2590,13 +2590,37 @@ static bool rust_crate_dir(const cbm_pipeline_ctx_t *ctx, const char *source_rel
     }
 }
 
+/* Directories whose direct .rs files, and whose <name>/ subdirectories, are each a
+ * crate target of their own: Cargo auto-discovers a binary per file or per
+ * subdirectory (with its main.rs) in src/bin, and one target per file or
+ * subdirectory in tests, examples and benches. Their `crate::` and `self::` name items
+ * of that one target, not of the package library under src. */
+static const char *const rust_target_dirs[] = {"src/bin", "tests", "examples", "benches"};
+
 /* The module root of the crate target holding source_rel in the package at
- * crate_dir: the package's first directory on the way down (src/ for the
- * library and binaries, tests/, benches/, examples/), or crate_dir itself
- * for a file directly in it (build.rs, a crate root: *is_root = true). */
+ * crate_dir. A file directly in a target directory is a crate root itself
+ * (root = that directory, *is_root = true); a file below <target dir>/<name>/ has
+ * that subdirectory as its root; otherwise the package's first directory on the
+ * way down (src/ for the library and src/main.rs), or crate_dir itself for a file
+ * directly in it (build.rs, a crate root: *is_root = true). */
 static bool rust_module_root(const char *source_rel, const char *crate_dir, char *out, size_t outsz,
                              bool *is_root) {
     size_t dl = strlen(crate_dir);
+    const char *rel = source_rel + (dl ? dl + SKIP_ONE : 0);
+    for (size_t i = 0; i < sizeof(rust_target_dirs) / sizeof(rust_target_dirs[0]); i++) {
+        size_t tl = strlen(rust_target_dirs[i]);
+        if (strncmp(rel, rust_target_dirs[i], tl) != 0 || rel[tl] != '/') {
+            continue;
+        }
+        const char *name_end = strchr(rel + tl + SKIP_ONE, '/');
+        size_t keep = name_end ? (size_t)(name_end - rel) : tl;
+        int w = snprintf(out, outsz, "%s%s%.*s", crate_dir, dl ? "/" : "", (int)keep, rel);
+        if (w < 0 || (size_t)w >= outsz) {
+            return false;
+        }
+        *is_root = name_end == NULL;
+        return true;
+    }
     const char *slash = strchr(source_rel + (dl ? dl + SKIP_ONE : 0), '/');
     size_t n = slash ? (size_t)(slash - source_rel) : dl;
     if (n >= outsz) {
