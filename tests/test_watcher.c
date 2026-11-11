@@ -553,6 +553,32 @@ TEST(watcher_missing_volume_is_never_pruned) {
     prune_fixture_teardown(&f);
     PASS();
 }
+
+/* A root spelled in an MSYS drive form ("/c/...") or as a relative path cannot be matched
+ * to a volume by the drive-letter probe, so its absence proves nothing about the directory
+ * having been deleted. Like a UNC path it is uncertain and must never be pruned. */
+TEST(watcher_non_drive_letter_root_is_never_pruned) {
+    static const char *const roots[] = {"/c/cbm-missing-msys-form", "cbm-missing-relative-root"};
+    for (size_t r = 0; r < sizeof(roots) / sizeof(roots[0]); r++) {
+        prune_fixture_t f;
+        if (!prune_fixture_setup(&f, "0")) {
+            FAIL("prune fixture setup failed");
+        }
+        cbm_store_t *store = cbm_store_open_memory();
+        cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+        cbm_watcher_watch(w, "stale-project", roots[r]);
+        for (int i = 0; i < 6; i++) { /* well past the 3-miss threshold, grace is 0s */
+            cbm_watcher_touch(w, "stale-project");
+            cbm_watcher_poll_once(w);
+        }
+        ASSERT_EQ(cbm_watcher_watch_count(w), 1);
+        ASSERT_EQ(access(f.db_path, F_OK), 0);
+        cbm_watcher_free(w);
+        cbm_store_close(store);
+        prune_fixture_teardown(&f);
+    }
+    PASS();
+}
 #endif
 
 TEST(watcher_prune_waits_for_daemon_project_mutation) {
@@ -4279,6 +4305,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_prunes_sustained_missing_root);
 #ifdef _WIN32
     RUN_TEST(watcher_missing_volume_is_never_pruned);
+    RUN_TEST(watcher_non_drive_letter_root_is_never_pruned);
 #endif
     RUN_TEST(watcher_prune_waits_for_daemon_project_mutation);
     RUN_TEST(watcher_prune_guard_denial_and_success_are_balanced);

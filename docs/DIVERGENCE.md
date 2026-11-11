@@ -13,7 +13,7 @@
 | `.gitignore` | 上游忽略規則 | 尾端加 `# --- fork ---` 區塊：`!CHANGELOG.md` 與本機 gate 產物 | 上游忽略 `CHANGELOG.md`，但本 fork 的 `CHANGELOG.md` 需入版控；gate 會產生 `.venv/` 等檔 | 上游新增規則併在 fork 區塊之上；上游若自己處理同一項，刪掉重複行 |
 | `src/cypher/cypher.c` | 交叉連接只擋 INT_MAX；`expr_binary` 配置未檢查 | 交叉連接中間列數上限 25 萬；配置失敗時釋放左右子樹並回傳 NULL，AND/OR/XOR 鏈結時檢查 | `MATCH (a) MATCH (b)` 可耗盡記憶體（有回歸測試）；記憶體不足時 NULL 解參考。AND/OR/XOR 長鏈與 UNION 長鏈的 stack overflow、OPTIONAL MATCH 的 heap overflow 上游已自己修好（2026-10 同步時採用上游版本） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `src/ui/http_server.c` | `/api/index` 以截斷後的路徑建索引、回應與 `/api/browse`、日誌輸出未完整跳脫 | 拒絕超過 job slot 的路徑；補跳脫；補一處 doc 洩漏 | 截斷可繞過工作區邊界；Windows 路徑的回應不是合法 JSON（`/api/index` 回應的跳脫上游已自己修好，2026-10-16 同步時採用上游版本） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
-| `src/watcher/watcher.c` | 根目錄判為不存在（ABSENT）就算已刪除 | Windows 上磁碟機不存在（拔除的隨身碟、移除的磁碟機代號）或 UNC 路徑時視為「不確定」而非已刪除 | 磁碟機拔除超過寬限期後索引資料庫被刪除。UTF-8 路徑上游已自己修好（#2639，2026-10-19 同步時採用上游版本，fork 的 `watcher_stat` 移除） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
+| `src/watcher/watcher.c` | 根目錄判為不存在（ABSENT）就算已刪除 | Windows 上磁碟機不存在（拔除的隨身碟、移除的磁碟機代號）或 UNC 路徑時視為「不確定」而非已刪除；非 `X:` 形式的根目錄（MSYS 的 `/c/...`、相對路徑等）一律視為「不確定」 | 磁碟機拔除超過寬限期後索引資料庫被刪除。UTF-8 路徑上游已自己修好（#2639，2026-10-19 同步時採用上游版本，fork 的 `watcher_stat` 移除）；`windows_volume_present` 遇 `/c/...` 形式直接回 true，磁碟機不在時索引被誤刪（獨立覆核發現，有回歸測試） | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/lsp/rust_cargo.c` | `members` 陣列遇到未加引號的項目無限迴圈 | 該輪未前進時強制前進一個字元 | 畸形 Cargo.toml 使索引 worker 卡死 | 上游若自己修好，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `internal/cbm/preprocessor.cpp` | 直接交給 simplecpp 展開，巨集展開大小無上限 | 展開前單趟估算 object-like 巨集的展開 token 數，超過 200 萬就回傳 NULL（呼叫端改用原始碼） | 1 KB 檔案 `#define A1 A0 A0 …` 可展開成 2^N 個 token（2^22 超過 2 分鐘）；simplecpp 為 vendored 且有雜湊保護，故防護放在非 vendored 的此檔（有回歸測試） | 上游若自己加上展開上限，採用上游版本並刪本列；否則保留本 fork 的修正 |
 | `tests/test_extraction.c` | — | 新增巨集展開炸彈測試（須在 20 秒內完成且仍找到真實函式）、正常巨集檔不受影響；Svelte 前置 script、長 Trigger 本體 JSON 測試、批次 A 回歸測試；上游的 Elixir 守衛作用域與用法測試（`extract_elixir_guarded_def_head_scope`、`..._guard_usages`）的期望 QN 改成帶模組 | 對應 preprocessor.cpp 修正；Elixir QN 帶模組（extract_defs.c） | 隨 preprocessor.cpp 一起處理 |
@@ -64,7 +64,7 @@
 | `tests/test_cypher.c` | — | 交叉連接上限斷言 | 對應 cypher.c 修正 | 隨 cypher.c 一起處理 |
 | `tests/test_httpd.c` | — | 新增兩個 index 回歸測試；過長路徑測試改用超過 4096 位元組的路徑 | 對應 http_server.c 修正；上游把路徑正規化後存入，`/./` 填充的短路徑不再算過長 | 隨 http_server.c 一起處理 |
 | `tests/test_doc_mentions_jvm.c` | 斷言同一行的第二個 Java 欄位沒有定義 | 改為有自己的定義 | 本 fork 讓每個名稱都產生欄位（extract_defs.c） | 隨 extract_defs.c 一起處理 |
-| `tests/test_watcher.c` | — | 新增非 ASCII 根目錄測試、磁碟機不存在不修剪測試 | 對應 watcher.c 修正 | 隨 watcher.c 一起處理 |
+| `tests/test_watcher.c` | — | 新增非 ASCII 根目錄測試、磁碟機不存在不修剪測試；新增非磁碟機代號根目錄不修剪測試 | 對應 watcher.c 修正；對應 watcher.c 修正 | 隨 watcher.c 一起處理 |
 | `tests/test_rust_lsp.c` | — | 新增畸形 `members` 測試、批次 G1 回歸測試 | 對應 rust_cargo.c 修正 | 隨 rust_cargo.c 一起處理 |
 | `tests/test_cli.c` | 讀取根目錄 `README.md` 驗證支援的 agent 清單 | 改讀 `README.en.md` | `README.md` 已改為繁中入口，上游原文在 `README.en.md` | 上游改讀哪個檔都跟著改回讀 `README.en.md` |
 | `tests/test_language_count_contract.sh` | 檢查 `README.md` 的語言數 | 改檢查 `README.en.md` | 同上 | 同上 |

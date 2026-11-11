@@ -1037,8 +1037,9 @@ typedef enum {
  * present drive was deleted; a missing directory because the drive is gone (an
  * unplugged USB disk, a removed drive letter) is only unavailable. Both report
  * the path absent, and the difference decides whether the cached index is
- * deleted. UNC paths are never proven present, so they are never pruned
- * automatically. */
+ * deleted. Only an "X:" path can be tied to a drive and proven present. UNC
+ * paths, MSYS forms ("/c/..."), relative paths and every other spelling cannot,
+ * so they are never pruned automatically. */
 static bool windows_volume_present(const char *path) {
     if ((path[0] == '/' || path[0] == '\\') && (path[1] == '/' || path[1] == '\\')) {
         return false;
@@ -1049,7 +1050,7 @@ static bool windows_volume_present(const char *path) {
         cbm_path_info_t info;
         return watcher_path_info(drive_root, &info) == CBM_PATH_INFO_OK && info.is_directory;
     }
-    return true;
+    return false;
 }
 #endif
 
