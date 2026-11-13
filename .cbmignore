@@ -1,0 +1,11 @@
+# Grammar sources of the vendored tree-sitter parsers (tools/tree-sitter-*/).
+#
+# Each directory holds a generated parser.c (3 to 44 MB) next to the grammar that
+# produced it; the copy the product compiles lives under internal/cbm/vendored/,
+# which discovery never enters. The test-impact artifact job builds the code graph
+# of HEAD from scratch whenever no previous bundle exists, and it must finish inside
+# a fixed 30-minute deadline. With these parsers in the graph that build took 27 to
+# 34 minutes and failed with "reading HEAD sources failed: internal/cbm/ac.c".
+# tools/tests/test_generated_sources_excluded_from_graph.py keeps a new grammar
+# from reintroducing this.
+/tools/tree-sitter-*/
