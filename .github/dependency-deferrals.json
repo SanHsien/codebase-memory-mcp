@@ -1,8 +1,8 @@
 {
   "deferrals": {
     "ruff": {
-      "deferredLatest": "0.17.3",
-      "reason": "The development gate runs ruff only with --select E9,F (tools/dev_check.ps1); that rule set passes on 0.16.10, 0.17.2 and 0.17.3, so the declared floor stays at the lowest version tested. Re-evaluate when a newer ruff is released."
+      "deferredLatest": "0.17.6",
+      "reason": "The development gate runs ruff only with --select E9,F (tools/dev_check.ps1). 2026-11-21: ruff 0.17.6 (latest on PyPI) passes that rule set and the full dev gate (45 tests); the 0.17.4-0.17.6 notes change only F601/F602 performance, the F823 false negative and F841's __traceback_hide__ exemption. The declared floor stays at the lowest version tested. Re-evaluate when a newer ruff is released."
     }
   },
   "notes": "Record deferred dependency version bumps here when keeping an existing major/minor line is intentional."
